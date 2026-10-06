@@ -20,13 +20,13 @@ output_dir     = "output"
 local       = true     # EEX adjusted using TODAY's own VWAPs in nearby contracts
 correlation = false    # Extension 1: measured weights between tenor groups
 cross       = false    # Extension 2: basis surprises from correlated products
-# How to use the historical adjustment when today's own VWAPs are missing:
-#   on   = always use available history (EEX x historical factor)
-#   off  = never use history (unadjusted EEX)
+# How to use the historical adjustment, alone or blended with today's anchors:
+#   on   = use available history in the selected ratio/additive mode
+#   off  = omit history; without local/cross, try the smoothed EEX fallback
 #   auto = use it where past own observations show improvement over EEX
 #          (assessed by group: short, month, quarter and long).
 hist        = "auto"
-arbitrage   = true     # Without EEX: reconstruct from available contracts (Q from months...)
+arbitrage   = false    # Opt in to reconstruct unresolved targets from own/already estimated contracts
 
 
 [eex]
@@ -87,6 +87,16 @@ ratio_eex_floor    = 1.0         # Reject near-zero ratio anchors; auto also use
 max_ratio_deviation = 1.0       # Maximum |VWAP/EEX - 1| for ratio anchors and final adjustments
 hist_max_age_days  = 60          # Expire factors this long after the latest real observation
 hist_auto_min_obs  = 10          # Effective comparisons before auto decides; use history during warmup
+
+
+[eex_fallback]
+# Used only when no local/historical/cross adjustment is available.
+# Never copy raw EEX into a missing curve point. Require complete windows.
+price_method = "ewma"          # simple: equal weights; ewma: normalized exponential weights
+price_window = 5               # Latest EEX publication dates, including the available current date
+ewma_halflife = 2.0            # Weight halves every 2 observations inside the finite price window
+spread_window = 9              # Simple mean of raw consecutive-month spreads over this many dates
+anchor_months = 2              # First months from the current calendar month: 2 means M+0 and M+1
 
 
 [correlation]

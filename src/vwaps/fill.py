@@ -10,13 +10,14 @@ Each layer is enabled or disabled in config.toml [layers]:
   eex+local  EEX adjusted with today's anchors                    [layers] local
   eex+cross  EEX adjusted with history and other products' shocks [layers] cross
   eex+hist   EEX adjusted with history (no anchors today)         [layers] hist
-  eex        Unadjusted EEX
-  arbitrage  Without EEX: use contracts already filled            [layers] arbitrage
+  eex+smooth EEX price averaging and monthly spread reconstruction
+  arbitrage  Without an EEX estimate: use available contracts     [layers] arbitrage
   missing    No estimate is available.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -31,6 +32,7 @@ from vwaps.basis import (
 )
 from vwaps.comove import EWCov
 from vwaps.config import Config
+from vwaps.eex_fallback import EexFallback
 from vwaps.consistency import check_day
 from vwaps.hours import hours_fn
 from vwaps.identity import CurveKey, curve_keys
@@ -86,6 +88,7 @@ class Series:
     hist: dict[str, BasisHistory]
     skill: dict[str, HistSkill]
     gcov: dict[tuple[str, str, str], EWCov] = field(default_factory=dict)  # (mode, group, group)
+    fallback: EexFallback | None = None
 
     @property
     def key(self) -> CurveKey:
@@ -216,7 +219,8 @@ class CurveFiller:
             self._update(series, day, preps)
         for name, ds in no_eex.items():
             log.warning("%s: no EEX settlement available yet from %s to %s (%d days): "
-                        "using only VWAPs + arbitrage", name, ds[0], ds[-1], len(ds))
+                        "using own VWAPs (contract reconstruction enabled: %s)",
+                        name, ds[0], ds[-1], len(ds), cfg.layer_arbitrage)
         return RunResult(pd.DataFrame(filled), pd.DataFrame(cons), pd.DataFrame(loo_rows), errors)
 
     # ------------------------------------------------------- prepare the day
@@ -386,6 +390,7 @@ class CurveFiller:
                 "eex_asof": p.asof, "basis": math.nan, "basis_local": math.nan,
                 "basis_hist": math.nan, "cross_adj": math.nan, "local_weight": math.nan,
                 "anchors": "", "cross_from": "",
+                "eex_fallback_trace": "",
                 "flag": "anchor_excluded" if per.key in p.rejected else "",
             }
             if delivery_hours <= 0:
@@ -409,6 +414,24 @@ class CurveFiller:
                     cross = self._cross_adj(s, per, preps, mode)
                 prior = (b_hist or 0.0) + cross[0] if cross else b_hist
                 b, w, src = _blend(b_loc, W, prior, cfg.shrink_k)
+                if src == "eex":
+                    if s.fallback is None and s.book is not None:
+                        s.fallback = EexFallback(s.book, s.hfn, cfg)
+                    smoothed = s.fallback.price(day, per) if s.fallback is not None else None
+                    if smoothed is None:
+                        row["flag"] = ";".join(filter(None, [row["flag"], "eex_fallback_unavailable"]))
+                        pending.append(row)
+                    else:
+                        confidence = 0.4 * (0.85 if r[1] != "exact" else 1.0)
+                        if p.asof != day:
+                            confidence *= 0.9
+                        row.update(
+                            price=smoothed.price, source="eex+smooth", confidence=round(confidence, 3),
+                            data_origin="estimated", estimation_method=smoothed.method,
+                            eex_fallback_trace=json.dumps(smoothed.trace, allow_nan=False, separators=(",", ":")),
+                        )
+                    rows.append(row)
+                    continue
                 if mode == "ratio" and abs(b) > cfg.max_ratio_deviation:
                     b = max(-cfg.max_ratio_deviation, min(cfg.max_ratio_deviation, b))
                     row["flag"] = ";".join(filter(None, [row["flag"], "ratio_adjustment_limited"]))
@@ -442,7 +465,8 @@ class CurveFiller:
             for row in pending:
                 r = arb.price(row["delivery_start"], row["delivery_end"], kind=row["kind"])
                 if r is not None:
-                    row.update(price=r[0], source="arbitrage", confidence=0.4, eex_method=r[1],
+                    row.update(price=r[0], source="arbitrage", confidence=0.4,
+                               eex_method=row["eex_method"] or r[1],
                                data_origin="estimated", estimation_method=f"contract_{r[1]}")
         for row in rows:
             if row["source"] != "missing" and not math.isfinite(row["price"]):
@@ -526,10 +550,13 @@ class CurveFiller:
             hidden = replace(p, own={k: q for k, q in p.own.items() if k != a.period.key},
                              anchors=others, mode_anchors=others_by_mode)
             label = p.own[a.period.key].tenors[0]
-            deployed = self._fill(s, day, {**preps, s.key: hidden}, labels=[label])
-            if deployed and math.isfinite(deployed[0]["price"]):
-                preds["pipeline_configured"] = deployed[0]["price"]
-                applied_modes["pipeline_configured"] = deployed[0]["basis_mode"]
+            # Contract reconstruction can depend on other estimated targets.
+            # Replay the production target set with this whole period hidden.
+            deployed = self._fill(s, day, {**preps, s.key: hidden}, labels=[*cfg.tenors, label])
+            prediction = next((row for row in deployed if row["tenor"] == label), None)
+            if prediction is not None and math.isfinite(prediction["price"]):
+                preds["pipeline_configured"] = prediction["price"]
+                applied_modes["pipeline_configured"] = prediction["basis_mode"]
             for method, pr in preds.items():
                 out.append({**base, "method": method, "basis_mode": applied_modes[method],
                             "pred": pr, "error": pr - a.own})

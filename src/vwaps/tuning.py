@@ -1,7 +1,8 @@
 """Select a bounded parameter grid on earlier dates and evaluate one holdout.
 
-The objective averages each curve's model/EEX MAE ratio with equal curve
-weight. Absolute price errors are reported separately by unit. This module
+Selection first maximizes prediction coverage, then compares each curve's
+model/EEX MAE ratio on observations predicted by every candidate, with equal
+curve weight. Absolute errors are reported separately by unit. This module
 never writes files or changes the caller's configuration or observations.
 """
 
@@ -89,6 +90,7 @@ def _observation_dates(cfg: Config, vw: pd.DataFrame, maps: list[ProductMap], st
 
 
 def _paired(loo: pd.DataFrame, dates: list[date], label: str) -> pd.DataFrame:
+    """Retain the complete EEX evaluation universe, including abstentions."""
     required = [*PAIR_KEYS, "method", "pred", "own"]
     if loo.empty or any(name not in loo for name in required):
         raise ValueError(f"{label}: no complete paired pipeline/EEX backtest observations")
@@ -100,7 +102,7 @@ def _paired(loo: pd.DataFrame, dates: list[date], label: str) -> pd.DataFrame:
     outputs = {}
     for method in ("eex", "pipeline_configured"):
         rows = frame[frame["method"] == method][[*PAIR_KEYS, "pred", "own"]].copy()
-        if rows.empty or rows.duplicated(PAIR_KEYS).any():
+        if (rows.empty and method == "eex") or rows.duplicated(PAIR_KEYS).any():
             raise ValueError(f"{label}: empty or duplicate {method} observation keys")
         for field in ("pred", "own"):
             rows[field] = pd.to_numeric(rows[field], errors="coerce")
@@ -108,15 +110,16 @@ def _paired(loo: pd.DataFrame, dates: list[date], label: str) -> pd.DataFrame:
                 raise ValueError(f"{label}: nonfinite {method} {field} values")
         outputs[method] = rows.set_index(PAIR_KEYS).sort_index()
     baseline, model = outputs["eex"], outputs["pipeline_configured"]
-    if not baseline.index.equals(model.index):
-        raise ValueError(f"{label}: pipeline and EEX must cover the same observation keys")
-    if not baseline["own"].equals(model["own"]):
+    if not model.index.isin(baseline.index).all():
+        raise ValueError(f"{label}: pipeline observation keys lack an EEX baseline")
+    if not baseline.loc[model.index, "own"].equals(model["own"]):
         raise ValueError(f"{label}: pipeline and EEX disagree on the held-out observations")
     paired = baseline.rename(columns={"pred": "eex_pred"}).copy()
     paired["model_pred"] = model["pred"]
     paired["error_eex"] = paired["eex_pred"] - paired["own"]
     paired["error_model"] = paired["model_pred"] - paired["own"]
-    if not np.isfinite(paired[["error_eex", "error_model"]].to_numpy()).all():
+    if (not np.isfinite(paired["error_eex"]).all()
+            or not np.isfinite(paired.loc[paired["model_pred"].notna(), "error_model"]).all()):
         raise ValueError(f"{label}: backtest errors exceed the finite numeric range")
     return paired.reset_index()
 
@@ -150,6 +153,8 @@ def _check_holdout_coverage(cfg: Config, vw: pd.DataFrame, maps: list[ProductMap
 
 
 def _score(paired: pd.DataFrame) -> tuple[float, int]:
+    if paired.empty:
+        return math.nan, 0
     ratios = []
     for _, rows in paired.groupby(IDENTITY_COLUMNS, sort=False):
         model = _mean(rows["error_model"].abs())
@@ -159,24 +164,35 @@ def _score(paired: pd.DataFrame) -> tuple[float, int]:
 
 
 def _mean(values: pd.Series) -> float:
+    if values.empty:
+        return math.nan
     numbers = values.to_numpy(dtype=float)
     scale = float(np.abs(numbers).max())
     return scale * float(np.mean(numbers / scale)) if scale else 0.0
 
 
 def _rmse(values: pd.Series) -> float:
+    if values.empty:
+        return math.nan
     # Scaling avoids overflowing when squaring otherwise finite errors.
     absolute = values.abs().to_numpy(dtype=float)
     scale = float(absolute.max())
     return scale * math.sqrt(float(np.mean((absolute / scale) ** 2))) if scale else 0.0
 
 
-def _report(paired: pd.DataFrame, trial_id: int, parameters: dict, dates: list[date]) -> pd.DataFrame:
+def _report(paired: pd.DataFrame, available: pd.DataFrame, trial_id: int,
+            parameters: dict, dates: list[date]) -> pd.DataFrame:
     rows = []
-    groups = [("overall", "", paired), *[("unit", unit, group) for unit, group in paired.groupby("unit", sort=True)]]
-    for scope, unit, group in groups:
+    groups = [("overall", "", paired, available), *[
+        ("unit", unit, paired[paired["unit"] == unit], group)
+        for unit, group in available.groupby("unit", sort=True)
+    ]]
+    for scope, unit, group, universe in groups:
         score, n_curves = _score(group)
+        n_available = int(universe["model_pred"].notna().sum())
         row = dict(trial_id=trial_id, scope=scope, unit=unit, n_paired=len(group), n_curves=n_curves,
+                   n_baseline=len(universe), n_available=n_available,
+                   n_missing=len(universe) - n_available, coverage=n_available / len(universe),
                    n_paired_dates=group["reference_date"].nunique(),
                    score=score, normalized_skill=1.0 - score,
                    reference_date_from=dates[0].isoformat(), reference_date_to=dates[-1].isoformat(),
@@ -196,7 +212,10 @@ def tune_parameters(
     """Choose on calibration dates only, then evaluate just the winner later.
 
     Dates are distinct reference dates with valid observations in active fill
-    curves. At least two calibration dates and one holdout date are required.
+    curves. At least two common calibration dates and one holdout date with
+    EEX coverage are required. Coverage is optimized before accuracy; accuracy
+    uses only the intersection of predictions from every candidate. Holdout
+    abstentions are reported even when no prediction can be scored.
     Earlier original observations remain available for normal chronological
     warmup. As each holdout day passes, its originals can inform later days;
     the selected parameters never change using holdout results.
@@ -213,9 +232,9 @@ def tune_parameters(
         raise ValueError("Tuning needs at least two calibration observation dates plus the requested validation_days")
     calibration_dates, holdout_dates = dates[:-validation_days], dates[-validation_days:]
     _check_holdout_coverage(cfg, vw, maps, books, holdout_dates)
-    calibration_reports = []
-    common = None
-    best_score, selected_trial, selected = math.inf, None, None
+    calibration_results = []
+    baseline = None
+    common_mask = None
 
     def evaluate(parameters: dict, days: list[date], label: str) -> pd.DataFrame:
         candidate_cfg = replace(cfg, **parameters)
@@ -228,23 +247,35 @@ def tune_parameters(
         return _paired(result.loo, days, label)
 
     for trial_id, parameters in enumerate(candidates, 1):
-        paired = evaluate(parameters, calibration_dates, f"Calibration trial {trial_id}")
-        if paired["reference_date"].nunique() < 2:
-            raise ValueError("Calibration requires at least two dates with paired pipeline/EEX observations; "
-                             "check mapping, usable anchors and EEX contract coverage")
-        evidence = paired[[*PAIR_KEYS, "own", "eex_pred"]].set_index(PAIR_KEYS).sort_index()
-        if common is None:
-            common = evidence
-        elif not common.equals(evidence):
+        available = evaluate(parameters, calibration_dates, f"Calibration trial {trial_id}")
+        evidence = available[[*PAIR_KEYS, "own", "eex_pred"]].set_index(PAIR_KEYS).sort_index()
+        if baseline is None:
+            baseline = evidence
+        elif not baseline.equals(evidence):
             raise ValueError("Calibration trials must use identical observation keys, truth and EEX baseline")
-        report = _report(paired, trial_id, parameters, calibration_dates)
+        mask = available["model_pred"].notna()
+        common_mask = mask if common_mask is None else common_mask & mask
+        calibration_results.append(available)
+
+    common = calibration_results[0].loc[common_mask]
+    if common["reference_date"].nunique() < 2:
+        raise ValueError("Calibration requires at least two dates with paired pipeline/EEX observations "
+                         "common to every candidate; check mapping, history, usable anchors and EEX contract coverage")
+    max_available = max(int(frame["model_pred"].notna().sum()) for frame in calibration_results)
+    calibration_reports = []
+    best_score, selected_trial, selected = math.inf, None, None
+    for trial_id, (parameters, available) in enumerate(zip(candidates, calibration_results), 1):
+        report = _report(available.loc[common_mask], available, trial_id, parameters, calibration_dates)
+        eligible = int(available["model_pred"].notna().sum()) == max_available
+        report["eligible_for_selection"] = eligible
         score = float(report.loc[report["scope"] == "overall", "score"].iloc[0])
-        if selected is None or score < best_score:
+        if eligible and (selected is None or score < best_score):
             best_score, selected_trial, selected = score, trial_id, parameters.copy()
         calibration_reports.append(report)
 
-    validation = evaluate(selected, holdout_dates, f"Validation of trial {selected_trial}")
-    validation_report = _report(validation, selected_trial, selected, holdout_dates)
+    validation_available = evaluate(selected, holdout_dates, f"Validation of trial {selected_trial}")
+    validation = validation_available[validation_available["model_pred"].notna()]
+    validation_report = _report(validation, validation_available, selected_trial, selected, holdout_dates)
     validation_report["selected"] = True
     calibration_report = pd.concat(calibration_reports, ignore_index=True)
     calibration_report["selected"] = calibration_report["trial_id"].eq(selected_trial)
@@ -252,7 +283,9 @@ def tune_parameters(
         "objective": "mean_per_curve_mae_model_over_mae_eex",
         "evaluated_method": "pipeline_configured", "baseline": "eex",
         "parameter_grid": {field: list(values) for field, values in parameter_grid.items()},
-        "selection_scope": "best calibration score within the supplied finite grid",
+        "selection_scope": "maximum calibration coverage, then best common-case score within the supplied finite grid",
+        "accuracy_scope": "intersection_of_predictions_from_all_calibration_candidates",
+        "coverage_denominator": "identical_eex_baseline_observations_with_held_out_truth",
         "lower_score_is_better": True, "tie_break": "first_candidate_in_grid_order",
         "calibration_start": calibration_dates[0].isoformat(), "calibration_end": calibration_dates[-1].isoformat(),
         "validation_start": holdout_dates[0].isoformat(), "validation_end": holdout_dates[-1].isoformat(),
@@ -260,13 +293,19 @@ def tune_parameters(
         "n_trials": len(candidates), "selected_trial_id": selected_trial,
         "calibration_score": best_score,
         "validation_score": float(validation_report.loc[validation_report["scope"] == "overall", "score"].iloc[0]),
+        "calibration_n_baseline": len(baseline), "validation_n_baseline": len(validation_available),
+        "calibration_n_available": max_available, "validation_n_available": len(validation),
+        "calibration_n_missing": len(baseline) - max_available,
+        "validation_n_missing": len(validation_available) - len(validation),
+        "calibration_coverage": max_available / len(baseline),
+        "validation_coverage": len(validation) / len(validation_available),
         "calibration_n_paired": len(common), "validation_n_paired": len(validation),
-        "calibration_paired_days": common.index.get_level_values("reference_date").nunique(),
+        "calibration_paired_days": common["reference_date"].nunique(),
         "validation_paired_days": validation["reference_date"].nunique(),
-        "calibration_paired_start": common.index.get_level_values("reference_date").min().isoformat(),
-        "calibration_paired_end": common.index.get_level_values("reference_date").max().isoformat(),
-        "validation_paired_start": validation["reference_date"].min().isoformat(),
-        "validation_paired_end": validation["reference_date"].max().isoformat(),
+        "calibration_paired_start": common["reference_date"].min().isoformat(),
+        "calibration_paired_end": common["reference_date"].max().isoformat(),
+        "validation_paired_start": None if validation.empty else validation["reference_date"].min().isoformat(),
+        "validation_paired_end": None if validation.empty else validation["reference_date"].max().isoformat(),
         "warmup_days": 0,
         "validation_protocol": "fixed_selected_parameters_with_chronological_original_history_updates",
     }

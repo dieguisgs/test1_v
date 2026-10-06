@@ -58,7 +58,9 @@ def test_same_product_curves_keep_separate_books_anchors_and_loo(cfg):
     maps = [mapping(), mapping("South"), mapping(unit="GBP/MWh")]
     prices = [100.0, 200.0, 300.0]
     frame = own([observation(m, price=price + 10.0) for m, price in zip(maps, prices)])
-    books = {m.key: book([(DAY, {"M+1": price, "M+2": price})])
+    # The hidden sole anchor must use its own book's price history.
+    publications = list(pd.bdate_range(end=DAY, periods=cfg.fallback_price_window).date)
+    books = {m.key: book([(day, {"M+1": price, "M+2": price}) for day in publications])
              for m, price in zip(maps, prices)}
     result = CurveFiller(cfg, frame, maps, books).run(DAY, DAY, loo=True)
     assert not result.errors
@@ -73,8 +75,8 @@ def test_same_product_curves_keep_separate_books_anchors_and_loo(cfg):
     pd.testing.assert_frame_equal(result.loo.sort_values(sort_loo).reset_index(drop=True),
                                   pd.concat(isolated_loo).sort_values(sort_loo).reset_index(drop=True))
     assert set(curve_keys(result.filled)) == {m.key for m in maps}
-    baseline = result.loo[result.loo.method == "pipeline_configured"]
-    assert list(baseline.sort_values("pred").pred) == prices
+    deployed = result.loo[result.loo.method == "pipeline_configured"]
+    assert list(deployed.sort_values("pred").pred) == pytest.approx(prices)
     report = summarize_loo(result.loo)
     assert set(report.unit) == {"EUR/MWh", "GBP/MWh"}
 
@@ -101,10 +103,13 @@ def test_same_product_histories_and_daily_replay_are_isolated(cfg):
 def test_blank_region_is_literal_and_nonblank_curve_cannot_use_product_book_fallback(cfg):
     blank, north = mapping(""), mapping("North")
     frame = own([observation(north, price=120.0)])
-    quotes = book([(DAY, {"M+1": 100.0, "M+2": 100.0})])
+    publications = list(pd.bdate_range(end=DAY, periods=cfg.fallback_price_window).date)
+    quotes = book([(day, {"M+1": 100.0, "M+2": 100.0}) for day in publications])
     result = CurveFiller(cfg, frame, [blank, north], {blank.key: quotes, north.key: quotes}).run(DAY, DAY)
     first = result.filled[result.filled.tenor == "M+1"].set_index("region")
-    assert first.loc["", "price"] == 100.0
+    assert first.loc["", "price"] == pytest.approx(100.0)
+    assert first.loc["", "source"] == "eex+smooth"
+    assert first.loc["", "estimation_method"] == "eex_price_ewma"
     assert first.loc["North", "price"] == 120.0
     unsupported = CurveFiller(cfg, frame, [north], {north.product: quotes}).run(DAY, DAY)
     output = unsupported.filled.set_index("tenor")
@@ -176,9 +181,14 @@ def test_errors_retain_full_curve_identity(cfg, monkeypatch):
 def test_consistency_never_uses_parts_from_another_curve(cfg):
     cfg = replace(cfg, tenors=["M+1", "M+2", "M+3", "Q+1"])
     maps = [mapping(), mapping(unit="GBP/MWh")]
-    books = {m.key: book([(DAY, {"M+1": price, "M+2": price, "M+3": price, "Q+1": price * 1.01})])
+    publications = list(pd.bdate_range(
+        end=DAY, periods=max(cfg.fallback_price_window, cfg.fallback_spread_window)).date)
+    books = {m.key: book([(day, {"M+1": price, "M+2": price, "M+3": price, "Q+1": price * 1.01})
+                         for day in publications])
              for m, price in zip(maps, [100.0, 200.0])}
     result = CurveFiller(cfg, own([]), maps, books).run(DAY, DAY)
+    assert not result.errors
+    assert result.filled["source"].eq("eex+smooth").all()
     combined = pd.DataFrame(check_day(result.filled.to_dict("records"), hours_fn("Base", "Europe/Berlin")))
     for report in (result.consistency, combined):
         output = report.set_index(IDENTITY_COLUMNS)

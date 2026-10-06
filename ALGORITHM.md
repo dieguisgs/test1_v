@@ -14,15 +14,19 @@ which cover only some contracts, and **EEX settlements**, which provide much of 
 
 ---
 
+**Quick navigation:** [cases step by step](#09-every-case-explained-step-by-step) · [complete configuration](#14-complete-configuration-reference-what-controls-each-decision) · [audit a row](#12-auditing-a-row).
+
 ## What to configure and what to leave at its initial value
 
-The 46 entries in `config.toml` are not 46 parameters you must optimize: 19 are paths,
+The 51 entries in `config.toml` are not 51 parameters you must optimize: 19 are paths,
 column names and time zones. For a first run, review paths, identity mappings and target
-tenors, and keep the `auto` calculation mode. The `correlation` and `cross` layers stay
+tenors, and keep the `auto` calculation mode. The `correlation`, `cross` and `arbitrage` layers stay
 disabled. Advanced controls are documented so changes are deliberate and auditable,
 not because every setting needs manual tuning. By default, `tune` compares only `auto`,
 `ratio` and `additive`; expanding the grid to its other five controls requires explicit
 options. All other TOML settings remain fixed.
+
+**Fallback change:** without usable own adjustments, EEX is smoothed over complete publication windows; it is never copied directly as the fallback. Section 16 explains averages, monthly cascading, controls and audit.
 
 ## 0. Understand the product before reading the formulas
 
@@ -93,7 +97,7 @@ to prices: the modes maintain separate memories and statistics.
 | Local W=4 + history, k=1: implemented calculation for this example | **125.28** | **124.4** |
 | Local W=4 without history: zero adjustment fallback | `120×(1+0.8×0.05)=124.8` | `120+0.8×5=124` |
 | No anchors, only permitted history | `120×1.02=122.4` | `120+2=122` |
-| No usable local, historical or cross adjustment | **120** | **120** |
+| No usable local, historical or cross adjustment | Smoothed EEX fallback in section 16; without a window, optional arbitrage/missing | Same: ratio/additive does not transform this fallback |
 
 Copying one known month's entire factor therefore does not always describe the calculation.
 `shrink_k` reduces the local adjustment. As W increases relative to k, the result approaches
@@ -110,14 +114,14 @@ cases that use EEX.
 | 1. Valid original | Numeric, finite own VWAP | Preserves its price, including zero/negative | It may be excluded as an anchor. Zero-hour delivery receives no calculated curve price, but its original is preserved |
 | 2. Gap with today's anchors | EEX and admissible observations | Blends local adjustment with permitted history/cross, or zero | Mode, weight, anchors, filters and EEX age |
 | 3. Gap with history | EEX, no local adjustment, current/permitted memory | Applies memory; optional cross may contribute | Memory precedes the date and has not expired |
-| 4. EEX reference only | EEX, no usable adjustment | Uses EEX unchanged | A reference estimate is not a trade |
+| 4. EEX reference only | EEX, no usable adjustment | Smooths EEX over complete windows; otherwise optional arbitrage/missing | Historical prices/spreads; not a copy of the latest settlement |
 | 5. Exact EEX quote absent | Sufficient EEX pieces | Constructs EEX by strip/residual, then applies adjustment logic | Hour coverage and residual amplification |
 | 6. EEX cannot be obtained | Sufficient own or already calculated contracts | With `arbitrage=true`, constructs by strip/residual | Not every combination is possible; global consistency is not forced |
 | 7. Insufficient information | Neither reference nor valid construction, or no delivery hours | Leaves `missing` with a reason | A result without a price can be correctly processed |
 | 8. Ratio fails selection rules | Small target EEX, additive anchors only, or permitted additive history only | Auto selects additive with a reason; forced modes retain their formula | Auto neither detects every outlier nor searches for the lowest-error mode |
 | 9. Outside activated scope | Unmapped, `off`, or empty `eex_file` | No estimated curve; originals remain in the requested enriched scope | Review mapping. An absent tenor outside targets is not created either |
 
-An EEX path **assigned but lacking data** keeps a curve active: originals and arbitrage may
+An EEX path **assigned but lacking data** keeps a curve active: originals and, if enabled, arbitrage may
 be used. **No assigned source** excludes it. When today's EEX publication is unavailable,
 the latest earlier publication may be used under `[eex]`, never a future one. Its age is
 recorded and that date does not train memory using the stale reference.
@@ -151,7 +155,7 @@ ratio deviation also excludes it. Additive admits finite differences passing com
 
 Near-zero example: own 2 and EEX 0 give an additive difference of +2. Target EEX 1 would give 3
 **if the entire adjustment were applied**; the engine retains blending with w and history.
-Target EEX 0 triggers additive in auto. Forced ratio still gives `0×(1+adjustment)=0`:
+Target EEX 0 triggers additive in auto. With an available ratio adjustment, `0×(1+adjustment)=0`; without components, section 16 applies:
 the anchor denominator filter does not modify the target EEX price.
 
 ### 0.6. History and the two meanings of “auto”
@@ -223,6 +227,313 @@ original input: output CSVs do not train the model. Section 5 details these thre
 
 ---
 
+### 0.9. Every case explained step by step
+
+**How to read this section.** Every example assumes an exact identity activated as `fill`,
+an assigned EEX file and positive delivery hours. Numbers are teaching examples, not actual
+trades. To make each addition visible, adjustment examples force `basis_mode="additive"`;
+the supplied default remains `auto`.
+
+These are not nine competing models trying to produce the best price. The engine follows an
+**availability sequence**. Preserve own prices; if absent, try EEX with permitted components;
+without components, try smoothing; only a still-pending target can enter arbitrage if enabled.
+**`arbitrage=false` is the default.**
+
+```mermaid
+flowchart TD
+    A["Active target with delivery hours"] --> B{"Own price for the same period?"}
+    B -->|Yes| C["Preserve original or reuse equivalent period"]
+    B -->|No| D{"Can EEX reference be priced?"}
+    D -->|Yes| E{"Usable local, historical or cross component?"}
+    E -->|Yes| F["Apply adjustment and record components"]
+    E -->|No| G{"Complete smoothing windows?"}
+    G -->|Yes| H["Smoothed EEX"]
+    G -->|No| I{"Arbitrage enabled and sufficient pieces?"}
+    D -->|No| I
+    I -->|Yes| J["Contract reconstruction"]
+    I -->|"No: default"| K["missing"]
+```
+
+`ratio`, `additive` and `auto` determine **how an adjustment is expressed**. Local, history
+and cross determine **where its information comes from**. Ratio +10% with EEX 100 and local
+weight 0.6 gives 106; additive +10 price units also gives 106 in that example, but they differ
+at EEX 200. Auto chooses a formula by its rules, not whichever predicts each point best.
+EEX smoothing and contract reconstruction are other routes: they do not apply a basis formula.
+
+`source` summarizes the route or dominant component. `estimation_method` lists the available
+components involved; mentioning `history` does not imply its numerical value is nonzero.
+Enriched `data_origin` classifies the **physical input or added row**.
+
+#### FAQ: “What are the two modes, and what does auto decide?”
+
+Three similarly named controls perform different jobs:
+
+| Control | Choices | Decision |
+|---|---|---|
+| `method.basis_mode` | `ratio`, `additive`, `auto` | Own-adjustment formula; auto selects one of the two formulas |
+| `eex_fallback.price_method` | `simple`, `ewma` | How to average EEX prices without adjustment components; explicit choice, **no auto option** |
+| `layers.hist` | `on`, `off`, `auto` | Whether memory for a mode/group is permitted; its auto compares earlier errors |
+
+Formula selection uses **the first matching rule**, in this order:
+
+1. `abs(target EEX) < ratio_eex_floor`, default 1 → **additive**.
+2. No valid ratio anchors remain, but an additive anchor exists → **additive**.
+3. Neither mode has anchors, and only additive history is current and permitted by hist
+   → **additive**.
+4. Otherwise → **ratio**.
+
+With target magnitude at least 1 and one admissible anchor, Own 110 / EEX 100 permits ratio;
+Own −110 / EEX −100 can also permit it: two negative prices produce a positive factor.
+Own 3 / EEX 0 cannot supply a ratio anchor but may supply a valid additive difference.
+Own zero or opposite signs also disqualify a ratio anchor. If **other** valid ratio anchors
+remain, rejecting one does not by itself trigger additive; the first target-price rule
+still takes precedence.
+
+Auto checks availability and guards, **not an unknown gap's error or whichever price seems
+more convincing**. Forced ratio retains its filters and does not automatically switch to
+additive when an anchor fails. The common filter can reject an observation in both modes.
+Section 3, step 3b, details limits, flags and selection cases; section 16 explains simple/EWMA,
+and section 7 explains hist-auto.
+
+#### Case 1. A valid original exists: preserve it
+
+**Meaning and trigger.** The row contains a numeric, finite VWAP. Suppose own M+1 is **110**
+although EEX for that period is **100**. Enriched output keeps 110 in `vwap` and `curve_price`:
+it does not reduce it to 100 or an average. Finite zero and negative values remain originals.
+Low volume or anchor rejection does not authorize replacing the observation.
+
+**Steps and output.** Resolve date/identity/delivery, recognize the own price and preserve the
+observation. In this single-observation example: `data_origin=original`, `curve_source=own`,
+`estimation_method=none`, `curve_price=110`. The internal curve may aggregate duplicates/aliases;
+enriched output preserves each individual row and its own value.
+
+**Limit and next step.** Original does not mean validated as a market price. An invalid cell
+remains unchanged but no longer supplies a usable price: estimation is attempted for
+`curve_price`. An absent row is a gap. Zero-hour delivery is not estimated in the calculated
+curve, although its physical original remains preserved.
+
+#### Case 2. The row is missing, but an equivalent own period exists
+
+**Meaning and requirements.** Reuse an own observation with the same date, product, region
+and unit, whose delivery interval matches exactly. No statistical similarity between
+contracts is needed and no price is copied from another reference date.
+
+**Example.** For reference **2026-09-29**, Base profile and calendar-day convention, `D+1`
+delivers on 2026-09-30. `BOM` also delivers from September 30 through exclusive October 1.
+There is an original D+1 row at **80**, and no BOM row.
+
+1. Resolve both labels to the same interval.
+2. Find its own observed price, 80.
+3. Add BOM at 80 if BOM is a configured target; no ratio, history or EWMA is calculated.
+
+**Output.** D+1 remains `original / own / none`. The added BOM row has
+`data_origin=estimated`, `curve_source=own`, `estimation_method=own_equivalent_period`
+and `curve_price=80`. The calculated engine curve treats the period as own; the enriched
+row is estimated because **that physical row contained no original observation**, not because
+80 is a statistical prediction. An invalid original BOM row can receive the same treatment
+in `curve_price` while retaining its original `vwap` cell.
+
+**Limit and next step.** Delivery and hours must truly match. A Weekend is not automatically
+reused as a zero-hour Peak BOW. Without an equivalent own period, proceed to EEX.
+
+#### Case 3. Local adjustment exists, without permitted history or cross
+
+**Meaning and requirements.** Other own contracts today can be compared with EEX. Their
+admissible differences can shift the target even when that target was not traded.
+Assume target EEX **100**, weighted local basis `b_local=10`, evidence `W=1.5` and
+`shrink_k=1`. Then `w=1.5/(1.5+1)=0.6`. These weights are example assumptions.
+
+1. Anchors in other periods produce a local difference of +10 price units; for example,
+   own 210 versus its EEX 200 contributes +10.
+2. Without permitted history/cross, the **adjustment's** fallback is zero.
+3. `basis=0.6×10+0.4×0=6`; price **100+6=106**.
+
+**Output.** `estimated / eex+local / additive_local`; `curve_basis_local=10`,
+empty `curve_basis_hist`, `curve_local_weight=0.6`, `curve_basis=6`.
+
+**Limit and next step.** It does not transfer the full +10: local evidence is moderated.
+Smoothed EEX does not supply the other 40%; that share goes to a zero adjustment. If anchors
+are absent/rejected or local is disabled, try permitted history/cross; without any component,
+try smoothing. Without target EEX, even +10 cannot produce a price through this route.
+
+#### Case 4. Local adjustment and permitted history both exist
+
+Keep EEX **100**, local **+10** and `w=0.6`; now earlier additive history **+4** is current
+and permitted. Cross is disabled.
+
+1. Today's signal contributes `0.6×10=6`.
+2. Earlier memory contributes `0.4×4=1.6`.
+3. Total adjustment **7.6**; price **107.6**.
+
+**Output.** `estimated / eex+local / additive_local_history`; local 10, history 4, weight 0.6,
+basis 7.6. Source remains local because its weight dominates, while method reveals both parts.
+
+**What it does not mean.** It does not add the full 10+4, or average unrelated own contract
+prices without EEX. History is a comparable difference for that identity/mode, not yesterday's
+price. If history expires or hist-auto rejects it, return to local with zero prior: 106 under
+these assumptions. If local disappears but history remains valid, use the next case.
+
+#### Case 5. No local adjustment today, but permitted history exists
+
+**Requirements.** Target EEX **100**, earlier additive memory **+4**, unexpired and allowed by
+`hist=on` or hist-auto; cross disabled. No own trade today is required.
+
+With `w=0`, `basis=4`, price **104**. Output:
+`estimated / eex+hist / additive_history`; `curve_basis_hist=4`,
+empty `curve_basis_local`, `curve_local_weight=0`.
+
+Memory was learned from original Own/EEX pairs on the same dates, after predicting those
+earlier dates. Its EWMA learns differences on observed days; expiry uses calendar days.
+**History +4 without target EEX produces neither 4 nor 104**: the price level to adjust is
+absent. The last price is not carried forward. Without usable history, try enabled cross with
+sufficient evidence; without components, smooth EEX. Without EEX, only optional reconstruction
+or missing remains.
+
+**How much history is used, and how to configure it.** This is not “keep only the last ten
+days.” These `config.toml` controls answer different questions:
+
+| Control | Default | Meaning and effect of changing it |
+|---|---|---|
+| `method.ewma_halflife_days` | `10` | Exponential memory, counting updates on days with valid observations. After 10 updates, the previous state's influence halves; after 20, it is one quarter. Larger values retain more older influence and react more slowly; smaller values react faster. Not a fixed ten-day window |
+| `method.hist_max_age_days` | `60` | Expires each kind/group/global mean, per identity and mode, after more than 60 calendar days since its latest admissible original paired with same-date EEX. Larger allows memory to remain unrefreshed longer; smaller retires it sooner. It does not individually remove every observation older than 60 days |
+| `run.warmup_days` | `0` | Rebuilds the state before the calculated interval by replaying all supplied original history. Only admissible pairs with same-day EEX update these means. Positive N limits startup to N preceding calendar days; among positive values, larger adds context and smaller removes it. Does not fetch absent data and can make daily differ from a long refill; see section 5 |
+
+Learning example: previous mean **+4**, and valid anchors on a new date produce daily adjustment
+**+10**. With half-life 10, `alpha=1−2^(−1/10)≈0.066967`; the update is
+`(1−alpha)×4+alpha×10 = 4.401802`. This new state is available for **later dates**:
+first predict the date using earlier memory, then learn its observation. Days without valid
+pairs do not count as updates, although they count toward calendar expiry. Older influence
+decays while the mean remains current; ten observations do not automatically cut it off.
+
+`method.hist_auto_min_obs=10` is a separate threshold: effective prior comparison mass before
+hist-auto decides whether to permit history against the EEX benchmark. Increasing it delays
+the decision; decreasing it allows an earlier decision. It does not store a ten-price window
+or independently change expiry; during this warmup, current history is permitted.
+
+This differs from `eex_fallback.price_window=5` and `eex_fallback.ewma_halflife=2`: those
+controls average **EEX prices** in a finite window of five publications. Own history learns
+**differences between Own and EEX** through recursive memory. Section 16 explains that separate
+fallback.
+
+#### Case 6. Cross contributes information from other curves
+
+**Meaning.** `cross=false` by default. When enabled, historical relationships between surprises
+in Own−EEX differences — or Own/EEX−1 in ratio — can modify the prior. It requires target EEX,
+current internal target memory, and sufficient joint evidence from an active helper.
+It does not copy a foreign price or perform currency conversion.
+
+**Example with all three components.** Target EEX 100, local +10, permitted history +4, w=0.6.
+A helper has a +4 surprise relative to its own basis mean; learned beta 0.5 contributes
+`cross_adj=0.5×4=2`. These are teaching assumptions for an already admissible relationship.
+
+1. Corrected prior: `history+cross=4+2=6`.
+2. Blend: `0.6×10+0.4×6=8.4`.
+3. Price **108.4**. Output `estimated / eex+local / additive_local_history_cross`.
+
+`source=eex+local` does not deny cross participation: local has weight 0.6 and the method
+lists all three components. Without local, history+cross gives **106** with
+`source=eex+cross` and `additive_history_cross`.
+
+**Switches and limits.** With hist off/rejected, +4 is not added; cross can still use internal
+memory to calculate surprises. With local 10 and w=0.6, a cross-only prior of +2 gives
+**106.8**, method `additive_local_cross`. Without valid cross, return to local/history;
+without any component, smoothing. Also disabled by default, `correlation` modifies weights
+between tenor groups; it is distinct from cross, which uses other identities. Neither
+guarantees an improvement.
+
+#### Case 7. No usable own adjustment: smoothed EEX fallback
+
+**Trigger.** No own price for the period; an EEX reference is allowed, but no usable local,
+permitted history or cross exists. It does not copy the latest settlement. Complete windows
+from section 16 are required: no skipping a required publication or using a partial window.
+
+**Price example.** For an anchor month, its latest five publications price the same absolute
+month at **100,102,104,106,108**. With `price_method=ewma` and half-life 2 observations,
+oldest-to-latest weights are approximately **0.088947,0.125790,0.177894,0.251580,0.355788**.
+Their weighted sum is **105.318945**. Simple averaging gives **104**.
+
+**Farther-month example.** Default anchor months are M0 and M1 counted from the reference
+date's calendar month, each averaged separately. M2 starts from the M1 average, not a pooled
+M0/M1 average. If nine simultaneous M2−M1 differences are 10,11,…,18, their simple mean is 14:
+**M2=105.318945+14=119.318945**. Spreads always use raw same-publication prices; the latest spread
+is not smoothed again. A quarter is averaged as a quarter, not forced to match its months.
+
+**Output.** `estimated / eex+smooth / eex_price_ewma` for the anchor month;
+`eex_month_cascade_ewma` for M2. Empty basis/local weight; JSON
+`curve_eex_fallback_trace` contains all evidence. Raw EEX remains the reference in
+`curve_eex_settle`; selected ratio/additive mode is not applied to this average.
+
+**Two different EWMAs.** Own history recursively averages **relative or additive differences between Own and EEX**, and expires.
+This fallback averages **EEX prices of the same contract** over a finite window with normalized
+weights. They share neither memory nor learning observations. Previous estimates do not
+become observations in the fallback.
+
+**When evidence is missing.** Set `eex_fallback_unavailable`; with arbitrage disabled, leave
+missing. Enabling arbitrage allows the next case to try contract pieces. Complete windows
+can reduce coverage and smoothing can lag actual changes: better predictions are not guaranteed.
+
+#### Case 8. Optional contract reconstruction: arbitrage
+
+**Initial setting.** `[layers].arbitrage=false`. Setting it to `true` enables another route
+for **still-pending targets**: EEX cannot value them, or no own adjustment was usable and
+smoothing lacked a complete window. It does not compete with history or replace every price
+with one considered more consistent.
+
+**Example without usable EEX.** Own October, November and December prices all equal **120**;
+Q4 is absent. The months exactly cover Q4 and have positive hours. Even if memory says +4,
+without EEX Q4 that adjustment cannot produce a price.
+
+- Default `false`: Q4 stays **missing**.
+- With `true`: combine by hours, not by number of months:
+  `(120×H_oct+120×H_nov+120×H_dec)/(H_oct+H_nov+H_dec)=120`.
+  Output `estimated / arbitrage / contract_strip`, price **120**.
+- If instead EEX Q4 **100** and permitted history **+4** exist, without local/cross,
+  the result is **104**, `eex+hist / additive_history`, even with arbitrage=true.
+  It does not compare 104 with 120 or replace the already resolved price.
+
+**Pieces and limits.** Pieces can be own or already estimated prices from that date.
+A strip requires contiguous full coverage, weighted by delivery-profile hours. A residual
+subtracts a covered head from a parent contract to value its tail; it is not a general
+solver for arbitrary systems of contracts. A small tail amplifies errors. Construction
+may inherit errors from estimated pieces and does not make the entire curve arbitrage-free.
+
+**Two distinct constructions.** `arbitrage=false` **does not disable** Pricer obtaining the
+EEX reference by exact/strip/residual before adjustment, or pricing each publication in the
+smoothed fallback. It disables final reconstruction from own/already filled prices.
+If disabled or without admissible pieces, the target remains missing. A result obtained after
+smoothing failed can retain `eex_fallback_unavailable`, recording the preceding attempt.
+
+#### Case 9. No justifiable price: missing
+
+**Example.** Target VWAP is absent; EEX is unusable even though additive history +4 remains;
+arbitrage is disabled. Or EEX exists but there are no adjustments and only three publications
+where the window requires five. There is no final price.
+
+Calculated curve: `source=missing`, `data_origin=missing`, `estimation_method=unavailable`,
+empty price. Enriched output: `data_origin=missing`, `estimation_method=none`, empty
+`curve_price`. Window failure carries its flag; zero-hour delivery has `zero_delivery_hours`.
+
+Missing **does not mean zero**, a technical failure, or permission to invent a settlement.
+Other curve points may still be priced. An existing missing record counts as processed for
+catchup; use daily/refill to revisit it when new evidence arrives. To expand coverage,
+review inputs, mapping, windows and — only if that route is wanted — enable arbitrage.
+
+| Case under the assumptions above | Price | Enriched origin | Source | Method |
+|---|---:|---|---|---|
+| Original M+1 | 110 | original | own | none |
+| BOM reused from equivalent D+1 | 80 | estimated | own | own_equivalent_period |
+| Local | 106 | estimated | eex+local | additive_local |
+| Local + history | 107.6 | estimated | eex+local | additive_local_history |
+| History only | 104 | estimated | eex+hist | additive_history |
+| Local + history + cross | 108.4 | estimated | eex+local | additive_local_history_cross |
+| Anchor-month EWMA | 105.318945 | estimated | eex+smooth | eex_price_ewma |
+| Next month by cascade | 119.318945 | estimated | eex+smooth | eex_month_cascade_ewma |
+| Q4 from own months, arbitrage enabled | 120 | estimated | arbitrage | contract_strip |
+| Insufficient evidence / route disabled | empty | missing | missing | none |
+
+
+---
+
 ## 1. Inputs and outputs
 
 **Inputs**
@@ -259,7 +570,7 @@ the literal value `""`, never a wildcard matching every value. An empty `product
 
 - `data_origin`: `original` when the row's VWAP was numeric and finite, `estimated` when the
   engine supplies a missing price, or `missing` when no usable price is available.
-- `estimation_method`: the actual method, such as `ratio_local_history`, `eex` or
+- `estimation_method`: the actual method, such as `ratio_local_history`, `eex_price_ewma` or
   `contract_strip`; `none` for valid originals and gaps without an estimate.
 - `curve_price`: the usable price. If an original VWAP is empty or invalid, the original cell
   remains unchanged and any available estimate is recorded here.
@@ -344,8 +655,8 @@ Start with EEX and adjust it using your observations. There are **three configur
 | `[method].basis_mode` | Behaviour |
 |---|---|
 | `auto`, the default | Selects ratio or additive for each gap using its EEX price, eligible anchors and available history; the exact decision tree is in step 3b |
-| `ratio` | Always uses a relative adjustment: `basis = Own/EEX − 1`, `price = EEX × (1 + basis)` |
-| `additive` | Always uses a price-unit difference: `basis = Own − EEX`, `price = EEX + basis` |
+| `ratio` | When adjustment exists, uses a relative adjustment: `basis = Own/EEX − 1`, `price = EEX × (1 + basis)` |
+| `additive` | When adjustment exists, uses a price-unit difference: `basis = Own − EEX`, `price = EEX + basis` |
 
 `auto` is not a third pricing formula: it selects one of the other two and records which.
 Original VWAPs remain unchanged. The following introductory examples explain the ratio branch:
@@ -498,7 +809,7 @@ is always preserved in the enriched file. Whether it can supply a ratio is a sep
 | Anchor factor | `Own/EEX > 0` | Own = 0 with nonzero EEX, or opposite price signs: excluded |
 | Factor deviation | `abs(Own/EEX − 1) <= max_ratio_deviation`, default 1 | Factors too far from 1 are excluded |
 | Both prices negative | The same checks apply | Own = −10, EEX = −12 gives factor 0.833333, accepted if the other filters pass |
-| Target EEX price with forced `ratio` | The floor does not alter or clip the target price | Target EEX = 0 gives `0 × (1 + basis) = 0`; `auto` selects additive for this target |
+| Target EEX price with forced `ratio` | The floor does not alter or clip the target price | With a usable ratio adjustment, target EEX = 0 gives `0 × (1 + basis) = 0`; without components section 16 applies; `auto` selects additive |
 
 Two anchor lists are prepared. Both pass the common volume and configured deviation filters;
 additive then accepts finite Own/EEX pairs, while ratio also requires the checks in the table.
@@ -553,13 +864,13 @@ outlier detector or an automatic selector of the lowest-error local model.
 
 The `history_only` branch checks history that is current **and allowed by `[layers].hist`**.
 With `hist = off`, neither history is allowed; with `hist = auto`, each mode's own score is
-checked. With no anchors, a non-small EEX and history disabled, the outcome is ratio and
-unadjusted EEX even if additive memory remains internally. Local/cross switches still apply:
+checked. With no anchors, a non-small EEX and history disabled, ratio is selected;
+without usable cross, the smoothed EEX fallback is attempted even if additive memory remains internally. Local/cross switches still apply:
 choosing a mode does not enable a disabled layer. Cross can use its internal history for a
 surprise even when hist does not add its mean, as described in section 10.
 
 Original observations are preserved without estimation or automatic-selection flags.
-Without a target EEX price, contract construction (`arbitrage`) or `missing` still applies;
+Without a target EEX price, `missing` applies unless you enable contract construction (`arbitrage`);
 auto does not create an absent EEX curve. Zero-hour targets remain `missing` in the engine.
 
 **Auditable examples.** The three local-anchor rows assume total weight `W = 1` in the chosen
@@ -572,10 +883,10 @@ In real runs W is calculated, not fixed at 1.
 | Anchor Own = 102, EEX = 100; target EEX = 0 | additive, `auto_additive_low_eex` | `b_local = 2`; `b = 1`; price `0 + 1 = 1` |
 | Anchor Own = 2, EEX = 0; target EEX = 1 | additive, `auto_additive_no_ratio_anchors` | `b_local = 2`; `b = 1`; price `1 + 1 = 2`; the pure difference without shrinkage would give 3 |
 | No anchors, no allowed ratio history, allowed/current additive history = 2; target EEX = 150 | additive, `auto_additive_history_only` | `w = 0`; `b = 2`; price `150 + 2 = 152` |
-| No anchors or history; target EEX = 150 | ratio, final branch | No adjustment; price `150`, source `eex` |
+| No anchors or history; target EEX = 150 | ratio, final branch | Without cross, smoothed fallback `eex+smooth`; its price cannot be inferred from today's 150 alone |
 
 Forced `ratio` would leave the zero-EEX target in the second example at 0. Forced `additive`
-uses differences for every EEX-backed gap, even when ratio is stable. Automatic selection
+uses differences for gaps with usable adjustment components, even when ratio is stable. Automatic selection
 avoids unsuitable divisions in its branches, but does not guarantee that additive differences
 predict well: with `max_anchor_dev = 0`, large differences may be accepted. Predictive value
 requires a backtest, rather than merely observing that a price can be produced.
@@ -710,7 +1021,7 @@ adjusted_historical_ratio = historical_ratio + β × other_product_surprise_toda
 ```text
 w = W / (W + shrink_k)
 ratio = w × local_ratio + (1 − w) × historical_ratio_or_adjusted_prior
-With no history, the historical prior is 0, meaning unadjusted EEX.
+Without permitted history, the prior basis is zero; a local component still produces an adjustment. If no components exist, use the smoothed fallback in section 16.
 ```
 
 Example: `w = 6.19 / (6.19 + 1) = 0.861`, then
@@ -732,8 +1043,8 @@ records the requested setting. They can differ when auto is configured.
 | EEX and local anchors; `w ≥ 0.5` or no historical/cross prior | adjusted_price | `eex+local` |
 | EEX, few/no local anchors, and a correlated product with observations today | adjusted_price | `eex+cross` |
 | EEX, few/no local anchors, and usable history | adjusted_price | `eex+hist` |
-| EEX with no local, historical or cross adjustment available | EEX | `eex` |
-| No EEX price can be obtained | Strip/residual from prices already available that day | `arbitrage` |
+| EEX with no local, historical or cross adjustment available | Complete-window fallback (section 16); otherwise optional arbitrage/missing | `eex+smooth` when priced |
+| No EEX reference or complete smoothing window, and arbitrage enabled | Strip/residual from prices already available that day | `arbitrage` |
 | None of the above | Empty | `missing` |
 
 Zero-hour targets remain `missing` in the calculated curve before this cascade is applied;
@@ -759,14 +1070,14 @@ corrected**: observed VWAPs do not have to agree exactly across aggregations.
 | 1 | Own contract VWAP exists | Preserve it in enriched output; the calculated curve uses `own` when delivery hours are positive |
 | 2 | Valid VWAP with volume below `min_volume` | Preserve the original; positive-hour contracts remain `own` in the curve but cannot act as adjustment anchors |
 | 3 | Missing contract, other own VWAPs today | EEX adjusted by eligible anchors in the chosen mode (`eex+local`) |
-| 4 | **No own VWAPs for the product today** | Select a mode, then `[layers] hist` allows its historical adjustment (`eex+hist`) or leaves unadjusted `eex`; hist-auto compares prior errors by mode/group |
+| 4 | **No own VWAPs for the product today** | Select a mode, then `[layers] hist` allows its historical adjustment (`eex+hist`) or attempts smoothed EEX (without a window: optional arbitrage/missing); hist-auto compares prior errors by mode/group |
 | 4b | No own VWAPs, but a correlated product has observations | If enabled and eligible, use EEX × (1 + history + β × other surprise) in ratio mode (`eex+cross`) |
-| 5 | No own history yet | Unadjusted EEX (`eex`) |
+| 5 | No own history yet | Smoothed EEX `eex+smooth`; insufficient windows lead to optional arbitrage/missing |
 | 6 | EEX lacks the contract: cascading, Seasons, BOW/BOM | Build from EEX pieces, then apply cases 3/4/5; `eex_method` is strip/residual |
 | 7 | EEX has not published today | Latest allowed earlier curve, logged age, confidence ×0.9; no history update |
-| 8 | An EEX file is assigned but absent or has no quotes for the date | Own VWAPs plus contract construction; logged warning |
+| 8 | An EEX file is assigned but absent or has no quotes for the date | Own VWAPs; contract construction only if arbitrage is enabled; logged warning |
 | 8b | Empty `eex_file`, even with `use = fill` or `helper` | Unassigned identity is reported and excluded from the engine; originals retained, no calculated curve |
-| 9 | Dates before local EEX coverage, before 10 August 2026 in the DE example | Own VWAPs plus construction; other cells `missing` |
+| 9 | Dates before local EEX coverage, before 10 August 2026 in the DE example | Own VWAPs; construction only if arbitrage is enabled; other cells `missing` |
 | 10 | EEX horizon is too short, such as Sum+3 without Q3-29 | Try available contract pieces if `arbitrage` is enabled; otherwise `missing` |
 | 11 | BOM on month end, BOW on Sunday | Engine does not create the tenor; existing input rows are preserved |
 | 12 | Same contract with two labels | One internal quote/anchor; both original rows remain in the enriched output |
@@ -853,7 +1164,7 @@ summary or `status`.
 
 ## 6. Parameters (`config.toml`)
 
-Summary of the main controls. **Section 14 details all 46 config.toml keys**, including
+Summary of the main controls. **Section 14 details all 51 config.toml keys**, including
 aliases, time zones, sensitivity, conditions of use and constraints.
 
 **Layers** (`[layers]`) control execution without code changes:
@@ -864,7 +1175,7 @@ aliases, time zones, sensitivity, conditions of use and constraints.
 | `correlation` | false | Improvement 1: measured weights between groups; section 10 |
 | `cross` | false | Improvement 2: surprises from related products; section 10 |
 | `hist` | auto | `on` uses valid history; `off` disables it; `auto` decides by group using prior errors. Also controls the prior in the local blend |
-| `arbitrage` | true | Without EEX, construct prices from available contract pieces |
+| `arbitrage` | false | Opt-in: reconstruct pending targets from own/filled contracts; EEX-reference Pricer remains active |
 
 **Other parameters:**
 
@@ -908,7 +1219,7 @@ aliases, time zones, sensitivity, conditions of use and constraints.
   `[conventions]` accordingly.
 - **`python run.py backtest`** performs leave-one-out evaluation: hide an own VWAP, predict it
   from the remaining information, and measure error by tenor group:
-  - `eex`: unadjusted EEX.
+  - `eex`: unadjusted EEX benchmark for error comparison only, not a production source.
   - `local_*`, `hist_*`, `blend_*`: analytical variants in ratio and additive modes.
   - `local_corr_*`, `blend_corr_*`: improvement 1.
   - `hist_cross_*`: improvement 2, simulating no own anchors that day; compare with `hist_*`.
@@ -932,7 +1243,11 @@ are written to `backtest_loo.csv` and `backtest_report.csv`.
 Synthetic truth comparison is also grouped by unit, and `detect-conventions` reports its
 discrepancies by unit. Keeping identities separate does not convert currencies.
 
-### Historical factor or unadjusted EEX on days without VWAPs? (`[layers] hist`)
+### Permit history based on comparison with the EEX benchmark? (`[layers] hist`)
+
+Unadjusted EEX here is an **evaluation benchmark**, not the production fallback. If hist-auto
+rejects history and no local/cross remains, section 16 applies, or optional arbitrage/missing. Older
+figures below illustrate the gate rather than validate the new fallback.
 
 The historical factor helps when your deviation from EEX **persists across days**.
 
@@ -954,10 +1269,10 @@ mode. Choosing ratio or additive is the separate `basis_mode` decision from step
 
 Illustrative synthetic backtest mean absolute errors:
 
-| Group | `hist_ratio` | `eex` | `auto` choice |
+| Group | `hist_ratio` | `eex` raw benchmark | Illustrative hist-auto implication |
 |---|---|---|---|
-| Days/Weeks | 0.82 | **0.74** | Unadjusted EEX |
-| Months | 0.77 | **0.71** | Unadjusted EEX |
+| Days/Weeks | 0.82 | **0.74** | Reject history; use other layers or smoothed fallback |
+| Months | 0.77 | **0.71** | Reject history; use other layers or smoothed fallback |
 | Quarters | **0.62** | 0.63 | History, nearly tied |
 | Seasons/Cals | **0.53** | 0.56 | History |
 
@@ -971,14 +1286,14 @@ can generate an additive scenario instead.
 
 ## 8. Current limitations
 
-- Before local EEX coverage begins, 10 August 2026 in the DE example, only own VWAPs and
-  contract construction are available.
+- Before local EEX coverage begins, 10 August 2026 in the DE example, own VWAPs remain available;
+  contract construction requires enabling arbitrage.
 - The engine can use only EEX history present in local files; filling does not download or
   recover absent publications.
 - An isolated daily input cannot reconstruct historical ratios. Earlier original observations
   are required; filled prices are not new training observations.
 - After `hist_max_age_days` without valid observations, the corresponding historical factor
-  expires. Predictions then rely on valid fallback history, today's anchors, or EEX alone.
+  expires. Predictions then rely on valid fallback history, today's anchors, or smoothed EEX; without coverage, optional arbitrage/missing.
 - Improvements 1 and 2 require common history to develop sufficient evidence
   (`prior_obs`, `min_obs`).
 - The inspected local EEX coverage starts in August 2026. Input observations from 2025 require
@@ -1167,7 +1482,7 @@ the simulated co-movements: **use a backtest on real data to decide whether to e
 
 ## 11. Daily use, pending recovery and historical refill
 
-Both uses share the same configuration, whose default input is `data/vwaps.xlsx`. To test a
+All three uses share the same configuration, whose default input is `data/vwaps.xlsx`. To test a
 separately generated synthetic history, select it explicitly; synthetic files are not included
 in the portable package:
 
@@ -1230,7 +1545,7 @@ obtained from an already observed equivalent contract with another label.
 | Enriched field | Meaning |
 |---|---|
 | `data_origin` | `original`, `estimated` or `missing`, describing this row's usable price |
-| `estimation_method` | Applied combination, such as `ratio_local_history_cross`, `additive_local`, `eex`, `contract_residual`, or `own_equivalent_period` for a differently labelled own period |
+| `estimation_method` | Applied combination, such as `ratio_local_history_cross`, `additive_local`, `eex_price_ewma`, `contract_residual`, or `own_equivalent_period` for a differently labelled own period |
 | `curve_reference_date` | Normalized observation date, not delivery date |
 | `curve_product` | Normalized product name used for matching |
 | `curve_region` | Normalized identity region; empty is a literal value |
@@ -1238,7 +1553,7 @@ obtained from an already observed equivalent contract with another label.
 | `curve_tenor` | Relative tenor label |
 | `curve_row_type` | `original`, `original_invalid` or `added`, relative to the input |
 | `curve_price` | Usable price; preserves each valid original VWAP and supplies an estimate for an invalid one when possible |
-| `curve_source` | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex`, `arbitrage` or `missing` |
+| `curve_source` | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage` or `missing` |
 | `curve_area` | Mapped area |
 | `curve_profile` | Mapped profile |
 | `curve_kind` | Resolved contract kind: Day, Month, Quarter, etc. |
@@ -1247,13 +1562,14 @@ obtained from an already observed equivalent contract with another label.
 | `curve_delivery_end` | Exclusive delivery end |
 | `curve_hours` | Target contract hours under its delivery profile and time zone |
 | `curve_confidence` | Heuristic score described in section 4 |
-| `curve_basis_mode` | Applied mode: `ratio` or `additive`; on an original row this does not mean the observed VWAP was adjusted |
+| `curve_basis_mode` | Selected `ratio`/`additive`; originals and `eex+smooth` do not apply a basis formula |
 | `curve_configured_basis_mode` | Requested configuration: `auto`, `ratio` or `additive` |
 | `curve_own_vwap` | Own observation; valid original rows show their individual value |
 | `curve_own_volume` | Original volume when available; not estimated volume |
 | `curve_eex_settle` | Direct or constructed EEX price for the target period |
-| `curve_eex_method` | `exact`, `strip` or `residual`; for `arbitrage`, describes construction from available prices rather than an EEX quote |
+| `curve_eex_method` | Exact/strip/residual method of the EEX reference. If fallback fails and arbitrage succeeds, this retains the reference method when present; otherwise it uses arbitrage method. Final reconstruction is in `estimation_method=contract_*` |
 | `curve_eex_asof` | Selected EEX curve date, allowing its age to be checked |
+| `curve_eex_fallback_trace` | Complete smoothed-fallback JSON: prices, weights, publications and monthly cascade; empty outside that branch |
 | `curve_basis` | Final applied adjustment, after any configured ratio clipping |
 | `curve_basis_local` | Adjustment from today's anchors |
 | `curve_basis_hist` | Historical adjustment allowed by layer settings and freshness |
@@ -1261,7 +1577,7 @@ obtained from an already observed equivalent contract with another label.
 | `curve_local_weight` | Local blending weight `w` |
 | `curve_anchors` | Up to three most influential anchor labels, not a complete anchor list |
 | `curve_cross_from` | Products providing the cross correction, with correlations |
-| `curve_flag` | Engine flags: `anchor_excluded`, `ratio_adjustment_limited`, `zero_delivery_hours`, and selection reasons `auto_additive_low_eex`, `auto_additive_no_ratio_anchors`, `auto_additive_history_only` |
+| `curve_flag` | Engine flags: `anchor_excluded`, `ratio_adjustment_limited`, `zero_delivery_hours`, `eex_fallback_unavailable`, and selection reasons `auto_additive_low_eex`, `auto_additive_no_ratio_anchors`, `auto_additive_history_only` |
 | `curve_flags` | Engine/enrichment flags: invalid VWAP, unmapped/disabled identity, `mapping_unassigned` when EEX is unassigned, empty unit or ambiguous other metadata |
 
 If an original row has no matching calculated curve row, some engine fields remain empty.
@@ -1270,6 +1586,9 @@ That neither deletes the original nor makes its value an estimate. `anchor_exclu
 adjusting other contracts.
 
 ### 12.2. Reconstructing a calculation
+
+For `curve_source=eex+smooth`, follow the JSON in section 16 and OUTPUT directly; the basis
+steps below apply to local/hist/cross estimates.
 
 For an estimated `M+4` row, review the following:
 
@@ -1303,7 +1622,7 @@ For an estimated `M+4` row, review the following:
    `consistency_history.csv`. Deviations are reported; the engine neither changes originals
    nor reoptimizes the full curve to eliminate them.
 
-For `source = eex`, use the recorded EEX price directly. For `arbitrage`, reconstruct the
+For `source = eex+smooth`, reconstruct the average and spreads in `curve_eex_fallback_trace`; do not apply a basis formula to the recorded settlement. For `arbitrage`, reconstruct the
 strip or residual from available daily prices, because no basis blend was applied. For
 `missing`, no price is available to audit; inspect which coverage or information was absent.
 
@@ -1419,7 +1738,7 @@ or enrich the complete input. See section 5.
 
 ## 14. Complete configuration reference: what controls each decision
 
-This chapter is a complete reference to the **46 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
+This chapter is a complete reference to the **51 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
 
 The tables distinguish a parameter's effect from the conditions under which it matters. Numeric operating ranges are guidance unless explicitly described as loader validation. Validate finite values and sensible ranges when editing the configuration; the loader does not enforce every recommended bound.
 
@@ -1438,11 +1757,11 @@ Absolute paths are allowed. A file assigned in the mapping but unavailable for r
 
 | Key | Default | What changes when enabled or disabled | When it applies / dependencies |
 |---|---|---|---|
-| `layers.local` | `true` | On: nearby original VWAPs from today adjust the target's EEX price. Off: removes that local contribution, increasing reliance on permitted history/cross or raw EEX. | Estimated targets with EEX. Distance, volume, type weights and `shrink_k` determine influence. Originals remain unchanged either way. |
+| `layers.local` | `true` | On: nearby original VWAPs from today adjust the target's EEX price. Off: removes that local contribution, increasing reliance on permitted history/cross or smoothed EEX. | Estimated targets with EEX. Distance, volume, type weights and `shrink_k` determine influence. Originals remain unchanged either way. |
 | `layers.hist` | `"auto"` | `on`: allow current historical basis. `off`: do not add that historical mean. `auto`: allow history unless sufficient earlier comparisons show raw EEX performs better. | Per mode and target group; needs unexpired history. `hist_auto_min_obs` delays the comparison decision. Off does not erase internal history or disable cross, which has its own switch. |
 | `layers.correlation` | `false` | On: measured relationships between tenor groups can replace part of the fixed other-kind weight. Off: use fixed distance/type weights. | Local estimation between different groups. Requires paired surprises; sparse data retain the prior. It does not by itself bring in another product's price. |
 | `layers.cross` | `false` | On: correlated surprises in other active curves can adjust the historical prior. Off: a curve uses its own observations/history and EEX only. | Requires the target's EEX and internal historical baseline, usable helper surprises, enough joint observations and adequate correlation. `fill` and `helper` curves with assigned EEX may help; `off` and unassigned curves may not. |
-| `layers.arbitrage` | `true` | On: attempt strip/residual reconstruction from known contracts when EEX cannot price a target. Off: such unresolved targets remain missing. | Fallback after direct EEX-based pricing. Needs a compatible delivery-hour calendar and enough covering contracts. It does not rewrite original prices or force every inconsistency away. |
+| `layers.arbitrage` | `false` | On: attempt strip/residual reconstruction from known contracts when EEX cannot price a target or its smoothing window fails. Off: such unresolved targets remain missing. | Opt-in, disabled by default; does not disable EEX-reference construction. Needs a compatible delivery-hour calendar and enough covering contracts. It does not rewrite original prices or force every inconsistency away. |
 
 Auto mode selection never turns on a disabled layer. Ratio and additive histories, scores, covariances and helper coefficients are separate. Defaults leave correlation and cross disabled until their usefulness has been checked on real data.
 
@@ -1486,15 +1805,27 @@ The supplied list is `D+1, D+2, D+3, WE, WE+1, WE+2, WE+3, BOW, W+1, W+2, W+3, W
 | `method.min_volume` | `0` | Increasing excludes more known low-volume observations from anchoring; decreasing admits more. This can reduce noise but also reduce coverage/evidence. | Common anchor filter before both modes; use a nonnegative threshold in the input volume units. Missing/invalid volume is unknown, not automatically below the threshold. Originals remain unchanged. |
 | `method.tau_log` | `0.5` | Larger spreads anchor influence farther along the delivery curve; smaller makes estimation more local and can reduce total local evidence W. | Local weights use exponential distance in log time to delivery. Loader requires >0. It changes both relative anchor selection and shrinkage through W; it does not affect a disabled local layer. |
 | `method.other_kind_weight` | `0.6` | Larger admits more influence from another contract kind; smaller favors same-kind anchors. Zero removes the fixed other-kind contribution. | Local weighting. Use a nonnegative value; 0..1 is a conservative attenuation range. Correlation can still supply a measured between-group component when enabled; same-kind weight is 1. |
-| `method.shrink_k` | `1.0` | Larger reduces today's weight `w=W/(W+k)` and favors the permitted prior; smaller trusts today's anchors more. Without a prior, shrinkage is toward raw EEX. | Local/history blending; loader requires >0. Direction of price movement depends on the local basis and prior, so larger k does not necessarily lower price. |
+| `method.shrink_k` | `1.0` | Larger reduces today's weight `w=W/(W+k)` and favors the permitted prior; smaller trusts today's anchors more. With local evidence and no history/cross prior, shrinks that adjustment toward zero; without any component, section 16 applies. | Local/history blending; loader requires >0. Direction of price movement depends on the local basis and prior, so larger k does not necessarily lower price. |
 | `method.ewma_halflife_days` | `10` | Larger makes historical basis and its skill scores adapt more slowly; smaller reacts faster and forgets older observations sooner. | Separate ratio/additive histories and historical error scores. Loader requires >0. Counts valid observation updates, not elapsed calendar days; expiry is controlled separately. |
 | `method.max_anchor_dev` | `0` | Zero disables this filter. Among positive values, larger admits more deviation; smaller rejects more. Moving from 0 to a positive bound activates filtering rather than loosening it. | Common filter: `abs(Own-EEX)/max(abs(EEX),ratio_eex_floor) > bound`. Use >=0. A rejected anchor still remains an original output value; both modes lose that anchor. |
 | `method.ratio_eex_floor` | `1.0` | Larger rejects more near-zero ratio anchors and makes auto choose additive for more low-price targets; smaller permits ratios closer to zero, increasing sensitivity to small denominators. | In the curve's price units; loader requires >0. Exactly at the floor is eligible. Also enters the common deviation filter's denominator. Does not clamp, replace or change the sign of EEX prices. |
 | `method.max_ratio_deviation` | `1.0` | Larger admits larger proportional anchor differences and permits a larger final ratio adjustment; smaller tightens both. | Ratio only; loader requires >0. Applies to `abs(Own/EEX-1)` and the final ratio basis. Opposite-sign ratios remain unusable. It does not cap additive differences or overwrite originals. |
-| `method.hist_max_age_days` | `60` | Larger permits older basis means to remain usable; smaller expires them sooner and increases reliance on today's evidence or raw EEX. | Positive calendar-day limit; loader requires >0. A kind/group/global mean expires after more than N days since its last valid own observation. A current group/global fallback can remain after one kind expires. |
+| `method.hist_max_age_days` | `60` | Larger permits older basis means to remain usable; smaller expires them sooner and increases reliance on today's evidence or smoothed EEX. | Positive calendar-day limit; loader requires >0. A kind/group/global mean expires after more than N days since its last valid own observation. A current group/global fallback can remain after one kind expires. |
 | `method.hist_auto_min_obs` | `10` | Larger delays evidence-based acceptance/rejection of history; smaller allows an earlier, noisier decision. Before reaching the threshold, available history is allowed. | Only controls `layers.hist="auto"`; use a nonnegative effective observation mass. Scores are separate by mode/group and decay with `ewma_halflife_days`, so this is not a raw row count. |
 
-Auto chooses additive if the target's absolute EEX price is below the floor; otherwise ratio when usable ratio anchors exist; otherwise additive when additive anchors exist; otherwise additive when only an allowed, current additive history exists; otherwise ratio. A low-price fallback with no usable adjustment can still return unadjusted EEX. History learns only from original anchors with same-day EEX, after prediction; estimated output never trains the model.
+Auto chooses additive if the target's absolute EEX price is below the floor; otherwise ratio when usable ratio anchors exist; otherwise additive when additive anchors exist; otherwise additive when only an allowed, current additive history exists; otherwise ratio. A target without usable adjustment attempts smoothed EEX; the selected mode does not transform that fallback. History learns only from original anchors with same-day EEX, after prediction; estimated output never trains the model.
+
+### Fallback without an adjustment (`[eex_fallback]`)
+
+Only used without local/hist/cross components. Section 16 explains formulas and complete windows.
+
+| Key | Default | Effect and constraints |
+|---|---|---|
+| `eex_fallback.price_method` | `"ewma"` | `simple` gives all N observations equal weight; `ewma` favors recent ones. Only these choices. Does not change simple spread averaging |
+| `eex_fallback.price_window` | `5` | Integer ≥2. Larger uses more publications and may smooth more, but needs more coverage; smaller has shorter memory. Not calendar days |
+| `eex_fallback.ewma_halflife` | `2.0` | Finite >0. Larger distributes more weight to older observations; smaller favors recent ones. Affects prices only under ewma; must remain valid under simple |
+| `eex_fallback.spread_window` | `9` | Integer ≥2. Complete window of simultaneous monthly differences. Larger needs more history and coverage. Applies only to monthly cascades |
+| `eex_fallback.anchor_months` | `2` | Integer ≥1 counted from M0. Larger averages more months independently and delays cascade onset; not a count of own VWAPs |
 
 ### Correlation and cross-curve assistance
 
@@ -1545,7 +1876,8 @@ from EEX. The program does not optimize resemblance to the EEX curve.
 
 For each evaluated observation, it hides that own point, predicts it with the configured
 pipeline and compares with the original value that actually existed. It does not hide the
-entire daily curve. Originals and EEX must overlap in dates and delivery periods; a similar
+entire daily curve. To reproduce arbitrage dependencies, it calculates every configured
+target plus the hidden point, then scores only that point. Originals and EEX must overlap in dates and delivery periods; a similar
 scraper without that overlap is insufficient. The command reports or fails on insufficient
 paired evidence rather than inventing metrics for dates without comparable data.
 
@@ -1577,21 +1909,36 @@ Defaults test three modes while keeping the other five fields fixed. Changing se
 as expiry or volume requires another explicit comparison; tune does not automatically search
 the entire configuration inventory.
 
-**How it chooses the better candidate:**
+**How it selects: coverage first, then comparable error.**
 
 1. Sort eligible own-observation dates for active fill curves and reserve the latest N for
-   validation. Calibrate all combinations on the earlier dates. Validation errors do not
-   participate in selecting the winner.
-2. Every candidate must use exactly the same own keys and EEX baseline. For each curve,
-   calculate `MAE_model / MAE_EEX`, both measured against the **same hidden own VWAP**.
-   Average those ratios with equal weight for each curve.
-3. The smallest calibration average wins. 1 matches EEX; 0.7 means mean normalized error
-   per curve is 30% below EEX, **not** 30% lower pooled currency MAE. If EEX is perfect on a
-   curve, its ratio is defined as 1 when the model is also perfect, otherwise infinity.
-   Ties favor the first candidate in grid order.
-4. Only then evaluate the winner on the later reserved dates, keeping parameters fixed.
-   Memory advances chronologically using originals already observed, including earlier
-   validation dates: each date uses only prior history. Future prices are not used.
+   validation. Calibrate every combination on earlier dates. Holdout does not select the winner.
+2. Define an identical universe with hidden own VWAP and available EEX benchmark. Cases without
+   an EEX benchmark are outside this relative objective. For each candidate report
+   `n_baseline`, `n_available` (finite predictions), `n_missing=n_baseline−n_available` and
+   `coverage=n_available/n_baseline`. Incomplete-window abstentions remain visible rather
+   than silently disappearing from the denominator.
+3. Only candidates with **maximum calibration coverage** are eligible. Measure accuracy on
+   the **intersection of predictions from every candidate**, including lower-coverage ones:
+   exactly the same cases for all. `n_paired` may be smaller than `n_available`. At least
+   two distinct dates must remain in that intersection; otherwise abort and review data/grid,
+   rather than compare different samples.
+4. Among maximum-coverage candidates, minimize the mean per-curve `MAE_model/MAE_EEX`, both
+   against the **same hidden own VWAP**. Curves have equal weight. Score 1 matches EEX;
+   0.7 means 30% less mean normalized per-curve error, not 30% less pooled currency MAE.
+   A perfect EEX baseline gives ratio 1 if the model is also perfect, otherwise infinity.
+   Coverage and score ties favor the first grid candidate.
+5. Evaluate **only the winner** on later dates with fixed parameters. Memory updates causally
+   using originals from earlier dates, including earlier holdout dates. Score uses its
+   available pairs while coverage uses the full EEX universe. No predictions means coverage 0,
+   `n_paired=0` and unassessable errors/score (empty/NaN in CSV, null in JSON); no invented score
+   or hidden coverage failure. Incomplete windows are abstentions; internal errors still abort.
+
+For example, a candidate covering 90 of 100 cases takes precedence over one covering 80,
+even if the latter has a lower error. Between two covering 90, compare score on the common
+intersection of the entire grid. Read **coverage and accuracy together** rather than assume
+the smallest error alone identifies the winner. All five `eex_fallback` settings stay fixed
+during search, including CLI overrides; they are not new search dimensions.
 
 Writes `output/tuning_calibration.csv`, `tuning_validation.csv` and `tuning_selected.json`.
 The CSVs report score, `normalized_skill=1-score`, paired counts and MAE/RMSE/bias by unit;
@@ -1603,8 +1950,159 @@ Retain input, EEX and mapping files too: paths/configuration alone do not preser
 business use, manually copy selected values into existing configuration sections. Failure
 of any candidate aborts evaluation rather than publishing a partial selection.
 
-This is the best candidate **among those tested, on calibration**, not a future guarantee.
+This is the best candidate **among those tested, at maximum calibration coverage and best common-case score**, not a future guarantee.
 Validation hides points that actually had observations: it may favor liquid periods and
 does not establish performance when an entire daily curve is missing, or reveal truth for
 actual unobserved gaps. Do not repeatedly tune against the same reserved period and then
 present it as independent evidence. Reserve fresh dates for later changes.
+
+
+---
+
+## 16. Smoothed EEX fallback when own adjustments are unavailable
+
+This fallback replaces the former direct settlement return. **It runs only when no local,
+permitted historical or usable cross component exists**, and a current EEX reference is
+allowed under the freshness policy. Originals and learned adjustments keep their existing
+calculations. An available adjustment whose value happens to be zero remains an adjustment:
+numerical equality with EEX does not trigger a different branch.
+
+In business terms, when there is no evidence for shifting EEX toward your level, the program
+avoids copying one publication. It estimates a level from several publications of the same
+contract; for farther months, it carries historical month-to-month differences forward from
+a nearby month. Own trades and previous estimates do not train this fallback.
+
+### Complete windows, fixed contracts and averages
+
+Use the latest distinct publication dates in the EEX file through the reference date,
+ending at the latest snapshot accepted by `eex.max_stale_days`. These are **publication
+observations**, not calendar days: reusing a stale settlement on several nonpublication days
+does not increase the sample. Future publications are never used.
+
+Every observation prices the **same absolute delivery period**. On each publication, Pricer
+may obtain it by exact contract, strip or residual under the delivery profile's hours.
+If that period cannot be priced on any of the file's latest N global publication dates,
+the window fails: no skipping gaps for older values, no forward-filling, no partial windows.
+
+- `simple`: arithmetic mean with weights `1/N`.
+- Default `ewma`: **finite, normalized** exponential mean of N observations,
+  `weight_j = 2^(-age_j/halflife) / sum_weights`; age 0 is the latest publication,
+  1 the previous one, and so on. This is not the own-basis recursive EWMA.
+- `ewma_halflife=2` gives an observation two publications older half the latest observation's
+  unnormalized weight. It does not mean two calendar days.
+
+### Months: a nearby level and differences between consecutive months
+
+With `anchor_months=2`, anchor months are **M0, the reference date's calendar month, and M1**.
+Each is averaged independently across `price_window=5` publications when requested.
+M2 and later start from the **last anchor month, M1**, adding:
+
+```text
+price(M2) = average_price(M1) + simple_mean_9(EEX(M2) − EEX(M1))
+price(M3) = price(M2)        + simple_mean_9(EEX(M3) − EEX(M2))
+...
+```
+
+Each spread uses both prices from the **same publication**, across the latest
+`spread_window=9` publications. Spreads use raw EEX prices; the latest day's spread is not
+replaced with a previously smoothed spread. This avoids smoothing an already averaged input again and keeps level and spread averages separate.
+Spread averages are always simple, including when price averages use EWMA.
+
+M3 needs the complete M1 price window and complete M1→M2 and M2→M3 spread windows.
+It does not require the M0 mean, because that anchor is independent. A missing link prevents
+an incomplete cascade from being published. Count months from the reference date, not a
+stale publication's date or the first configured target. With `anchor_months=1` the cascade
+starts at M0; with 3 it starts at M2.
+
+Day, Week, Weekend, Quarter, Season, Year, BOM and BOW average **their own absolute period**
+directly across the price window. They are not automatically replaced with smoothed months.
+The method retains historical monthly differences but does not force a quarter to equal its
+months' average; inconsistencies are reported.
+
+### Reproducible example: 5 price publications and 9 spread publications
+
+Reference date: 2026-09-30; M1=October, M2=November, M3=December. Teaching prices:
+
+| Publication | October | November | December | Nov−Oct | Dec−Nov |
+|---|---:|---:|---:|---:|---:|
+| 09-18 | 92 | 102 | 103 | 10 | 1 |
+| 09-21 | 94 | 105 | 107 | 11 | 2 |
+| 09-22 | 96 | 108 | 111 | 12 | 3 |
+| 09-23 | 98 | 111 | 115 | 13 | 4 |
+| 09-24 | 100 | 114 | 119 | 14 | 5 |
+| 09-25 | 102 | 117 | 123 | 15 | 6 |
+| 09-28 | 104 | 120 | 127 | 16 | 7 |
+| 09-29 | 106 | 123 | 131 | 17 | 8 |
+| 09-30 | 108 | 126 | 135 | 18 | 9 |
+
+The latest five October observations are 100,102,104,106,108; their simple mean is 104.
+With EWMA half-life 2, normalized weights from oldest to latest are 0.088947075, 0.125790159,
+0.177894149, 0.251580318 and 0.355788298: mean **105.318945**.
+The nine-publication mean Nov−Oct spread is **14** and Dec−Nov is **5**.
+EWMA results: M1 **105.318945**, M2 **119.318945**, M3 **124.318945**.
+Simple results: M1 **104**, M2 **118**, M3 **123**.
+
+November is not published as 126 merely because that is its latest settlement. If smoothing
+coincidentally equals the settlement — for example, constant prices — that equality is
+preserved; no artificial perturbation is added. Longer windows can lag regime changes;
+shorter windows can track more noise. Fixed delivery months avoid mixing rotating labels,
+but do not guarantee complete seasonality modeling or improved predictions. Validate on
+real observations and measure coverage too.
+
+### The five controls and their CLI alternatives
+
+```toml
+[eex_fallback]
+price_method = "ewma"
+price_window = 5
+ewma_halflife = 2.0
+spread_window = 9
+anchor_months = 2
+```
+
+| Key | Default | Effect and constraints |
+|---|---|---|
+| `eex_fallback.price_method` | `"ewma"` | `simple` gives all N observations equal weight; `ewma` favors recent ones. Only these choices. Does not change simple spread averaging |
+| `eex_fallback.price_window` | `5` | Integer ≥2. Larger uses more publications and may smooth more, but needs more coverage; smaller has shorter memory. Not calendar days |
+| `eex_fallback.ewma_halflife` | `2.0` | Finite >0. Larger distributes more weight to older observations; smaller favors recent ones. Affects prices only under ewma; must remain valid under simple |
+| `eex_fallback.spread_window` | `9` | Integer ≥2. Complete window of simultaneous monthly differences. Larger needs more history and coverage. Applies only to monthly cascades |
+| `eex_fallback.anchor_months` | `2` | Integer ≥1 counted from M0. Larger averages more months independently and delays cascade onset; not a count of own VWAPs |
+
+These controls do not change originals or prices with local/historical/cross adjustments.
+Price and spread windows are independent: neither must be larger than the other.
+Maximum staleness governs the latest accepted snapshot; it does not turn the windows into
+calendar-day windows. The 51 configuration keys include these five controls.
+
+Override them for one `daily`, `refill`, `catchup`, `backtest` or `tune` execution:
+
+| Option | Replaced control |
+|---|---|
+| `--eex-price-method simple` or `ewma` | `price_method` |
+| `--eex-price-window N` | `price_window` |
+| `--eex-ewma-halflife H` | `ewma_halflife` |
+| `--eex-spread-window N` | `spread_window` |
+| `--eex-anchor-months N` | `anchor_months` |
+
+Example: `python run.py daily --eex-price-method simple --eex-price-window 5`.
+Omitted options use TOML; the file is not modified. In tune these values remain fixed across
+all candidates: they do not add dimensions to the six-control search grid.
+
+### Result, audit and updating earlier outputs
+
+Source is `eex+smooth`; methods are `eex_price_simple`, `eex_price_ewma`,
+`eex_month_cascade_simple` and `eex_month_cascade_ewma`. `eex_settle` retains the unsmoothed
+EEX reference for audit. `basis` and `local_weight` are empty: they do not describe this
+average. `basis_mode` records the preceding ratio/additive selection, **not a formula applied
+to the smoothed fallback**. JSON `eex_fallback_trace` — `curve_eex_fallback_trace` in enriched
+output — records periods, dates, prices, weights and each spread for reconstruction.
+
+Without a complete window, flag `eex_fallback_unavailable` is set. Arbitrage is attempted only
+if explicitly enabled; otherwise, or without a valid construction, the price stays `missing`.
+The supplied arbitrage=false setting therefore leaves the unresolved target missing. The flag may persist
+after successful arbitrage. It never reverts to a raw settlement. Unadjusted EEX remains the
+`eex` benchmark in backtesting and hist-auto; a benchmark is distinct from production output.
+
+Apply this change to existing results with `refill --from ... --to ...` or
+`daily --date ...` on chosen dates. Catchup only recovers pending groups: an existing row,
+including `missing` or an estimate from an earlier version, is already processed and is not
+recalculated merely because the program was updated.

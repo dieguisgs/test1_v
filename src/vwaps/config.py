@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from dataclasses import dataclass
@@ -47,6 +48,11 @@ class Config:
     ratio_eex_floor: float = 1.0
     max_ratio_deviation: float = 1.0
     hist_max_age_days: int = 60
+    fallback_price_method: str = "ewma"
+    fallback_price_window: int = 5
+    fallback_ewma_halflife: float = 2.0
+    fallback_spread_window: int = 9
+    fallback_anchor_months: int = 2
 
     def tz(self, area: str) -> str:
         return self.timezones.get(area, self.timezones.get("default", "Europe/Berlin"))
@@ -54,6 +60,20 @@ class Config:
     def resolve(self, p: str | Path) -> Path:
         p = Path(os.path.expandvars(os.path.expanduser(str(p))))
         return p if p.is_absolute() else (self.base_dir / p)
+
+
+def validate_fallback_config(cfg: Config) -> None:
+    """Validate the finite-window EEX transformation, including CLI overrides."""
+    if cfg.fallback_price_method not in ("simple", "ewma"):
+        raise ValueError("eex_fallback.price_method must be simple or ewma")
+    for name, minimum in (("price_window", 2), ("spread_window", 2), ("anchor_months", 1)):
+        value = getattr(cfg, f"fallback_{name}")
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"eex_fallback.{name} must be an integer >= {minimum}")
+    half = cfg.fallback_ewma_halflife
+    if (isinstance(half, bool) or not isinstance(half, (int, float))
+            or not math.isfinite(half) or half <= 0):
+        raise ValueError("eex_fallback.ewma_halflife must be a finite positive number")
 
 
 def load_config(path: str | Path) -> Config:
@@ -67,6 +87,7 @@ def load_config(path: str | Path) -> Config:
     eex = raw.get("eex", {})
     corr = raw.get("correlation", {})
     cross = raw.get("cross", {})
+    fallback = raw.get("eex_fallback", {})
     cfg = Config(
         base_dir=path.parent,
         vwap_input=paths.get("vwap_input", "data/vwaps.csv"),
@@ -75,7 +96,7 @@ def load_config(path: str | Path) -> Config:
         layer_correlation=bool(layers.get("correlation", False)),
         layer_cross=bool(layers.get("cross", False)),
         layer_hist=str(layers.get("hist", "auto")).lower(),
-        layer_arbitrage=bool(layers.get("arbitrage", True)),
+        layer_arbitrage=bool(layers.get("arbitrage", False)),
         max_stale_days=int(eex.get("max_stale_days", 0)) or None,
         warn_stale_days=int(eex.get("warn_stale_days", 3)),
         timezones=dict(raw.get("timezones", {"default": "Europe/Berlin"})),
@@ -100,6 +121,11 @@ def load_config(path: str | Path) -> Config:
         ratio_eex_floor=float(method.get("ratio_eex_floor", 1.0)),
         max_ratio_deviation=float(method.get("max_ratio_deviation", 1.0)),
         hist_max_age_days=int(method.get("hist_max_age_days", 60)),
+        fallback_price_method=fallback.get("price_method", "ewma"),
+        fallback_price_window=fallback.get("price_window", 5),
+        fallback_ewma_halflife=fallback.get("ewma_halflife", 2.0),
+        fallback_spread_window=fallback.get("spread_window", 9),
+        fallback_anchor_months=fallback.get("anchor_months", 2),
     )
     cfg.mapping_file = cfg.resolve(paths.get("mapping", "mappings/products.csv"))
     cfg.eex_curves_dir = cfg.resolve(paths.get("eex_curves_dir", "../eex_scraper/output/curves/POWER"))
@@ -116,4 +142,5 @@ def load_config(path: str | Path) -> Config:
         raise ValueError("ratio_eex_floor, max_ratio_deviation and hist_max_age_days must be positive")
     if cfg.warmup_days < 0:
         raise ValueError("warmup_days must be >= 0; 0 replays all original history")
+    validate_fallback_config(cfg)
     return cfg

@@ -58,7 +58,7 @@ Input names `data_origin`, `estimation_method` and names starting with `curve_` 
 | `curve_row_type` | Text: `original`, `original_invalid`, `added` | Whether the physical row already existed, contained an unusable VWAP, or was appended. Independent of price origin. |
 | `curve_flags` | Semicolon-separated text or empty | Engine flags plus enrichment flags, listed below. |
 
-**Every other engine column in the next section is copied with `curve_` prefixed**, except `data_origin` and `estimation_method`, which use the enrichment semantics above. Thus the full normal trace also includes `curve_area`, `curve_profile`, `curve_kind`, `curve_period`, `curve_delivery_start`, `curve_delivery_end`, `curve_hours`, `curve_confidence`, `curve_basis_mode`, `curve_configured_basis_mode`, `curve_own_vwap`, `curve_own_volume`, `curve_eex_settle`, `curve_eex_method`, `curve_eex_asof`, `curve_basis`, `curve_basis_local`, `curve_basis_hist`, `curve_cross_adj`, `curve_local_weight`, `curve_anchors`, `curve_cross_from` and **`curve_flag`**. If no engine rows were produced, only the fixed enrichment columns are guaranteed; optional trace columns depend on the engine table supplied.
+**Every other engine column in the next section is copied with `curve_` prefixed**, except `data_origin` and `estimation_method`, which use the enrichment semantics above. Thus the full normal trace also includes `curve_area`, `curve_profile`, `curve_kind`, `curve_period`, `curve_delivery_start`, `curve_delivery_end`, `curve_hours`, `curve_confidence`, `curve_basis_mode`, `curve_configured_basis_mode`, `curve_own_vwap`, `curve_own_volume`, `curve_eex_settle`, `curve_eex_method`, `curve_eex_asof`, `curve_eex_fallback_trace`, `curve_basis`, `curve_basis_local`, `curve_basis_hist`, `curve_cross_adj`, `curve_local_weight`, `curve_anchors`, `curve_cross_from` and **`curve_flag`**. If no engine rows were produced, only the fixed enrichment columns are guaranteed; optional trace columns depend on the engine table supplied.
 
 `curve_flag` is the engine's singular `flag` copied unchanged. `curve_flags` is the combined enrichment field. Do not confuse them. On valid original rows, `curve_price`, `curve_source`, and, when present, `curve_own_vwap`/`curve_own_volume` describe that exact original row. Other trace fields describe the matching engine point and can be empty, or refer to an aggregate of repeated original delivery periods. The presence of an original row does not imply that all diagnostics were computed.
 
@@ -72,7 +72,7 @@ Illustrative rows, not actual market observations; all three use the same EUR/MW
 
 The third row also receives `original_vwap_missing_or_invalid`. If a price were available for it, its original `vwap` would still read `invalid`; `curve_price` would hold the estimate and `data_origin` would become `estimated`.
 
-## Filled output: all 32 engine columns
+## Filled output: all 33 engine columns
 
 These fields are written to `filled_history.csv` and daily filled files. There is one row per resolvable configured target label and active `fill` curve/date. An unresolvable target produces no row. Different labels can resolve to the same delivery period.
 
@@ -91,18 +91,19 @@ These fields are written to `filled_history.csv` and daily filled files. There i
 | `delivery_end` | ISO date | Exclusive delivery end. |
 | `hours` | Number, >=0 | Delivery hours under the mapped profile, timezone and target kind; includes applicable calendar/DST rules. |
 | `price` | Finite number or empty | Engine price in `unit`; empty with `source=missing`. |
-| `source` | Text | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex`, `arbitrage`, `missing`; see below. |
-| `confidence` | Number, 0..1 | Heuristic diagnostic, **not a probability or calibrated accuracy measure**. Own=1, missing=0, arbitrage=0.4. EEX-based values use 0.4 for raw EEX or `0.5+0.4*local_weight`, reduced by 0.85 for a non-exact contract and 0.9 for an earlier settlement; rounded to three decimals. |
-| `data_origin` | Text | `original` for own, `estimated` for a calculated price (including raw EEX), `missing` otherwise. |
+| `source` | Text | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage`, `missing`; see below. |
+| `confidence` | Number, 0..1 | Heuristic diagnostic, **not a probability or calibrated accuracy measure**. Own=1, missing=0, arbitrage=0.4. EEX-based values use 0.4 for smoothed EEX or `0.5+0.4*local_weight`, reduced by 0.85 for a non-exact contract and 0.9 for an earlier settlement; rounded to three decimals. |
+| `data_origin` | Text | `original` for own, `estimated` for a calculated price (including smoothed EEX), `missing` otherwise. |
 | `estimation_method` | Text | `none` for own, `unavailable` for missing, or a calculation method below. |
-| `basis_mode` | Text: `ratio`, `additive` | Effective mode selected for this target. On own/missing rows it does not mean that an adjustment was applied. |
+| `basis_mode` | Text: `ratio`, `additive` | Effective mode selected for this target. On own/missing/eex+smooth rows it does not mean that an adjustment was applied. |
 | `configured_basis_mode` | Text: `auto`, `ratio`, `additive` | Requested configuration, before target-specific selection. |
 | `own_vwap` | Number or empty | Own price for this delivery period, potentially an aggregate of duplicate rows/aliases; empty without a usable positive-hour own contract. |
 | `own_volume` | Number or empty | Volume associated with that own period; may be aggregated or unavailable. |
 | `eex_settle` | Number or empty | EEX price for this delivery period, exact or reconstructed. Not necessarily a directly quoted settlement. |
-| `eex_method` | Text or empty | `exact`, `strip`, `residual`; empty without a priced contract. For `source=arbitrage` it records the reconstruction method using already available curve/own contracts, even though no EEX price exists. |
+| `eex_method` | Text or empty | EEX reference method: `exact`, `strip` or `residual`. If smoothing fails and arbitrage succeeds, retains this reference method when present; without a reference it receives reconstruction method. `estimation_method=contract_*` always identifies final arbitrage construction. |
 | `eex_asof` | ISO date or empty | Date of the EEX snapshot used. Can be earlier than `reference_date`, or present even if that snapshot cannot price this particular target. |
-| `basis` | Number or empty | Final adjustment applied to EEX, after any ratio limit. Zero is a real adjustment of zero, distinct from empty on own/arbitrage/missing rows. |
+| `eex_fallback_trace` | JSON or empty | Full evidence for `eex+smooth`; see JSON dictionary below. Empty in other branches. |
+| `basis` | Number or empty | Final adjustment applied to EEX, after any ratio limit. Zero is a real adjustment of zero, distinct from empty on own/arbitrage/missing/eex+smooth rows. |
 | `basis_local` | Number or empty | Today's local anchor adjustment before blending; empty when unavailable or disabled. |
 | `basis_hist` | Number or empty | Historical adjustment actually admitted by the history policy; empty when unavailable, expired, disabled or rejected by the automatic skill gate. |
 | `cross_adj` | Number or empty | Cross-curve adjustment from eligible current surprises and learned relationships; empty when absent. |
@@ -113,6 +114,39 @@ These fields are written to `filled_history.csv` and daily filled files. There i
 
 For `basis`, `basis_local`, `basis_hist` and `cross_adj`, **ratio values are fractions**: `0.05` means +5%, and `price = eex_settle * (1 + basis)`. Additive values use the price unit: `0.05` means +0.05 EUR/MWh on an EUR/MWh curve, and `price = eex_settle + basis`. Never combine adjustments from different modes as if they shared units. `local_weight` is dimensionless in both modes. Own values need not have populated basis diagnostics.
 
+### Smoothed EEX fallback audit JSON
+
+`eex_fallback_trace` contains JSON within one CSV cell; enriched output calls it
+`curve_eex_fallback_trace`. It is empty outside a completed fallback. Window failure is
+identified by `eex_fallback_unavailable`, without inventing a partial calculation.
+In Python, use `json.loads(cell)` when the cell is nonempty.
+
+| JSON key | Meaning |
+|---|---|
+| `reference_date`, `eex_asof` | Calculated date and latest accepted publication |
+| `target` | Absolute target object `kind, delivery_start, delivery_end`; exclusive end |
+| `price_method`, `price_window`, `ewma_halflife`, `spread_window`, `anchor_months` | Five effective controls, including overrides |
+| `spread_input` | `raw_same_publication_prices`: raw same-publication EEX prices for each difference |
+| `price_average.period` | Averaged period: target for direct averaging, last anchor month for a cascade |
+| `price_average.value` | Initial weighted average |
+| `price_average.observations[]` | One entry per publication, chronologically ordered |
+| `observations[].trade_date, price, eex_method, weight` within `price_average` | Date, period price, exact/strip/residual reconstruction and normalized weight; weights sum to 1 |
+| `spread_steps[]` | Consecutive monthly cascade links; empty list for direct averaging |
+| `spread_steps[].from_period, to_period` | Previous and next absolute periods, each with `kind/delivery_start/delivery_end` |
+| `spread_steps[].mean_spread` | Simple mean spread, in price units |
+| `spread_steps[].price_before, price_after` | Cumulative price before and after adding this spread |
+| `spread_steps[].observations[]` | Publication evidence for this link |
+| `trade_date, from_price, to_price` within each spread observation | Shared date and both months' raw prices |
+| `from_eex_method, to_eex_method` | How each price was obtained: exact/strip/residual |
+| `spread, weight` | Difference `to_price−from_price` and weight `1/spread_window` |
+
+Audit: sum `price×weight` to reproduce `price_average.value`; in a cascade, sum each link's
+`spread×weight` and check every `price_after`. The last value must equal `price`.
+Do not reconstruct it with `eex_settle*(1+basis)`: the settlement retains the unsmoothed
+reference and `basis/local_weight` are empty. See section 16 of [ALGORITHM.md](ALGORITHM.md)
+for complete windows, M0/M1, worked examples and limits. Numerical equality with the latest
+settlement may happen; it does not mean the settlement was copied as a direct fallback.
+
 ### Sources and methods
 
 | `source` | Meaning |
@@ -121,16 +155,23 @@ For `basis`, `basis_local`, `basis_hist` and `cross_adj`, **ratio values are fra
 | `eex+local` | EEX with a local-led adjustment; a historical/cross component can also contribute. |
 | `eex+hist` | EEX with a history-led adjustment; local evidence can also contribute. |
 | `eex+cross` | EEX with a prior-led adjustment that includes cross-curve information. |
-| `eex` | EEX price without a basis adjustment. |
-| `arbitrage` | Reconstructed from available curve/own contracts when EEX cannot price the target. Does not guarantee an arbitrage-free entire curve. |
+| `eex+smooth` | EEX fallback from complete price averages and, for farther months, spreads. Never a direct settlement copy. |
+| `arbitrage` | Optional final reconstruction from available own/estimated contracts when no usable EEX reference exists or its unadjusted fallback cannot be smoothed. Disabled by default; enable with `arbitrage = true` in `[layers]`. Does not guarantee an arbitrage-free entire curve. |
 | `missing` | No available estimate, including zero delivery hours. |
+
+The sequence follows available information, not an intrinsic quality ranking. Historical
+basis is an adjustment relative to EEX, so it requires a usable EEX reference and permitted
+history. `arbitrage = false` does not disable `exact`/`strip`/`residual` construction of that
+EEX reference; it disables only the later reconstruction from own/already estimated contracts.
+For worked examples of the nine cases, see section 0.9 of [ALGORITHM.md](ALGORITHM.md).
 
 `source` is a summary category. For component detail, use `estimation_method` and the diagnostic columns. Engine methods are constructed exactly as follows:
 
-- `none`: own price; `unavailable`: engine price missing; `eex`: no adjustment components.
+- `none`: own price; `unavailable`: engine price missing.
 - `ratio_` or `additive_`, followed by the available component names in this fixed order: `local`, `history`, `cross`, joined with underscores. For example `additive_local_history` or `ratio_history_cross`. This describes available components in the calculation, not a claim that each numerical contribution is nonzero.
-- `contract_exact`, `contract_strip`, `contract_residual`: non-EEX contract reconstruction. `exact` uses the matching period, `strip` combines contiguous periods by delivery hours, and `residual` extracts the tail of a larger contract using the covered head.
-- Enriched output changes any unavailable method to `none`. A supplied price from `source=own` on an added/invalid original row becomes `own_equivalent_period`; it is marked `estimated` because that physical row did not contain a usable original price. Every valid original row instead has method `none`.
+- `eex_price_simple`, `eex_price_ewma`: direct period average. `eex_month_cascade_simple`, `eex_month_cascade_ewma`: anchor-month average plus simple spreads. The suffix describes price averaging, not spread averaging.
+- `contract_exact`, `contract_strip`, `contract_residual`: final contract reconstruction when `arbitrage` is enabled. `exact` uses the matching period, `strip` combines contiguous periods by delivery hours, and `residual` extracts the tail of a larger contract using the covered head. Components can be own or already estimated prices.
+- Enriched output changes any unavailable method to `none`. A supplied price from `source=own` on an added/invalid original row becomes `own_equivalent_period`; it is marked `estimated` because that physical row did not contain a usable original price. This reuses an equivalent delivery period for the same curve identity and reference date, not yesterday's price; it is not arbitrage and remains available when that layer is off. Every valid original row instead has method `none`.
 
 ### Flags
 
@@ -143,6 +184,7 @@ Flags are joined with `;`. An empty field means no listed condition. Several can
 | `auto_additive_low_eex` | Engine and enriched | Auto selected additive because target absolute EEX is below `ratio_eex_floor`. |
 | `auto_additive_no_ratio_anchors` | Engine and enriched | Auto selected additive because only additive anchors are usable today. |
 | `auto_additive_history_only` | Engine and enriched | No usable anchors today; only additive history is currently usable under the history policy. |
+| `eex_fallback_unavailable` | Engine and enriched | Complete EEX fallback window unavailable; missing by default, or final reconstruction if `arbitrage` is enabled. May remain after successful arbitrage. |
 | `ratio_adjustment_limited` | Engine and enriched | Final ratio basis was clipped to configured `max_ratio_deviation`. |
 | `unmapped_product` | Enriched combined flags | No mapping matches the full product/region/unit identity. |
 | `mapping_off` | Enriched combined flags | Matching mapping is off. |
@@ -209,6 +251,9 @@ Both tables contain:
 | `trial_id` | Candidate's 1-based position in the grid. |
 | `scope` | `overall` or `unit`. |
 | `unit` | Unit for scope=unit; blank for overall. |
+| `n_baseline` | Universe of own-truth observations with EEX benchmark; identical across calibration candidates. |
+| `n_available`, `n_missing`, `coverage` | Finite predictions, abstentions and this candidate’s `n_available/n_baseline`. |
+| `eligible_for_selection` | Calibration only: maximum-coverage candidate eligible for score comparison. |
 | `n_paired`, `n_curves`, `n_paired_dates` | Matched observations, distinct complete curve identities, and dates with paired observations. |
 | `score` | Mean, giving each curve equal weight, of that curve's model MAE / EEX MAE. Lower is better; 1 matches baseline. Baseline MAE=0 gives ratio 1 if model MAE=0, otherwise infinity. |
 | `normalized_skill` | `1 - score`; positive means normalized improvement. |
@@ -220,6 +265,8 @@ Both tables contain:
 | `mae_model`, `rmse_model`, `bias_model` | Configured-pipeline absolute errors in the unit on unit rows; empty on overall rows to avoid mixing currency/price units. |
 | `mae_eex`, `rmse_eex`, `bias_eex` | EEX baseline errors under the same rule and on the same paired observations. |
 | `selected` | Boolean; true for the calibration winner and all its validation rows. |
+
+Selection prioritizes maximum coverage, then minimizes score on the prediction intersection of ALL candidates. `n_paired` may be smaller than `n_available`; two common dates are required. Validation evaluates only the winner on its available pairs. With zero pairs: coverage 0 and unassessable score/errors (NaN/empty), without invented accuracy.
 
 `tuning_selected.json` has these top-level keys:
 
@@ -235,14 +282,16 @@ Both tables contain:
 All `metadata` keys:
 
 - `objective` = `mean_per_curve_mae_model_over_mae_eex`; `evaluated_method` = `pipeline_configured`; `baseline` = `eex`.
-- `parameter_grid`: requested field-to-list grid; `selection_scope`: best calibration score within that supplied grid; `lower_score_is_better`: true; `tie_break`: `first_candidate_in_grid_order`.
+- `parameter_grid`: requested field-to-list grid; `selection_scope`: maximum calibration coverage, then best common-case score within the supplied finite grid; `lower_score_is_better`: true; `tie_break`: `first_candidate_in_grid_order`.
 - `calibration_start`, `calibration_end`, `validation_start`, `validation_end`: allocated observation-date boundaries. `calibration_days`, `validation_days`: distinct allocated dates, not calendar-day duration.
 - `n_trials`, `selected_trial_id`, `calibration_score`, `validation_score`: candidate count, winner ID and scores.
+- `accuracy_scope` = `intersection_of_predictions_from_all_calibration_candidates`; `coverage_denominator` = `identical_eex_baseline_observations_with_held_out_truth`.
+- `calibration_n_baseline`, `calibration_n_available`, `calibration_n_missing`, `calibration_coverage` and matching `validation_*` fields: winner coverage and abstentions.
 - `calibration_n_paired`, `validation_n_paired`: matched prediction counts.
 - `calibration_paired_days`, `validation_paired_days`, `calibration_paired_start`, `calibration_paired_end`, `validation_paired_start`, `validation_paired_end`: dates actually contributing matched observations.
 - `warmup_days` = 0; `validation_protocol` = `fixed_selected_parameters_with_chronological_original_history_updates`.
 
-`base_configuration` keys are `base_dir`, `vwap_input`, `mapping_file`, `eex_curves_dir`, `output_dir`; `layer_local`, `layer_correlation`, `layer_cross`, `layer_hist`, `layer_arbitrage`; `max_stale_days`, `warn_stale_days`, `timezones`, `tenors`, `day_convention`, `weekend_offset`; `basis_mode`, `min_volume`, `tau_log`, `other_kind_weight`, `shrink_k`, `ewma_halflife_days`, `max_anchor_dev`, `hist_auto_min_obs`; `corr_halflife_days`, `corr_prior_obs`, `cross_min_corr`, `cross_min_obs`, `cross_halflife_days`; `warmup_days`, `vwap_columns`, `ratio_eex_floor`, `max_ratio_deviation`, `hist_max_age_days`. These are configuration values, not measured outcomes; see [ALGORITHM.md](ALGORITHM.md) and [config.toml](config.toml) for their meaning. Paths become strings. Nonfinite diagnostic numbers are serialized as JSON `null`; CSV diagnostic scores may display `inf`/`-inf` for the zero-baseline case above. This does not permit nonfinite production prices.
+`base_configuration` keys are `base_dir`, `vwap_input`, `mapping_file`, `eex_curves_dir`, `output_dir`; `layer_local`, `layer_correlation`, `layer_cross`, `layer_hist`, `layer_arbitrage`; `max_stale_days`, `warn_stale_days`, `timezones`, `tenors`, `day_convention`, `weekend_offset`; `basis_mode`, `min_volume`, `tau_log`, `other_kind_weight`, `shrink_k`, `ewma_halflife_days`, `max_anchor_dev`, `hist_auto_min_obs`; `corr_halflife_days`, `corr_prior_obs`, `cross_min_corr`, `cross_min_obs`, `cross_halflife_days`; `warmup_days`, `vwap_columns`, `ratio_eex_floor`, `max_ratio_deviation`, `hist_max_age_days`; `fallback_price_method`, `fallback_price_window`, `fallback_ewma_halflife`, `fallback_spread_window`, `fallback_anchor_months`. These are configuration values, not measured outcomes; see [ALGORITHM.md](ALGORITHM.md) and [config.toml](config.toml) for their meaning. Paths become strings. Nonfinite diagnostic numbers are serialized as JSON `null`; CSV diagnostic scores may display `inf`/`-inf` for the zero-baseline case above. This does not permit nonfinite production prices.
 
 ## Synthetic files
 

@@ -6,14 +6,14 @@ import argparse
 import json
 import math
 import statistics
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from vwaps.backtest import compare_truth, summarize_loo
-from vwaps.config import Config, load_config
+from vwaps.config import Config, load_config, validate_fallback_config
 from vwaps.dates import parse_reference_dates
 from vwaps.enrich import enrich_input
 from vwaps.fill import CurveFiller
@@ -26,7 +26,7 @@ from vwaps.mapping import (COLUMNS, ProductMap, check_mapping, eex_path, guess_r
 from vwaps.synthetic import make_synthetic
 from vwaps.tenors import parse_tenor, resolve_tenor
 
-SOURCES = ["own", "eex+local", "eex+cross", "eex+hist", "eex", "arbitrage", "missing"]
+SOURCES = ["own", "eex+local", "eex+cross", "eex+hist", "eex+smooth", "eex", "arbitrage", "missing"]
 KEYS = ["reference_date", *IDENTITY_COLUMNS]
 ENRICHED_KEYS = [f"curve_{name}" for name in KEYS]
 
@@ -89,10 +89,30 @@ def main(argv: list[str], config_path: Path) -> int:
                    help="how to generate the VWAP-EEX difference (controls synthetic model bias)")
     p.add_argument("--out", default="data")
 
+    for command in ("daily", "refill", "catchup", "backtest", "tune"):
+        parser = sub.choices[command]
+        group = parser.add_argument_group("EEX fallback transformation (override config for this run)")
+        group.add_argument("--eex-price-method", dest="fallback_price_method", choices=("simple", "ewma"),
+                           default=None, help="finite-window price average: equal or exponential weights")
+        group.add_argument("--eex-price-window", dest="fallback_price_window", type=int, default=None,
+                           help="complete price window in EEX publication dates, at least 2")
+        group.add_argument("--eex-ewma-halflife", dest="fallback_ewma_halflife", type=float, default=None,
+                           help="positive exponential weight half-life in observations within the price window")
+        group.add_argument("--eex-spread-window", dest="fallback_spread_window", type=int, default=None,
+                           help="complete simple-average monthly spread window, at least 2 dates")
+        group.add_argument("--eex-anchor-months", dest="fallback_anchor_months", type=int, default=None,
+                           help="directly averaged months from the current calendar month, at least 1")
+
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
     setup_logging(cfg.output_dir / "_logs", " ".join(["run.py", *argv]))
     try:
+        overrides = {name: getattr(a, name) for name in (
+            "fallback_price_method", "fallback_price_window", "fallback_ewma_halflife",
+            "fallback_spread_window", "fallback_anchor_months",
+        ) if getattr(a, name, None) is not None}
+        cfg = replace(cfg, **overrides)
+        validate_fallback_config(cfg)
         return {
             "mapping": cmd_mapping, "daily": cmd_daily, "refill": cmd_refill,
             "catchup": cmd_catchup, "status": cmd_status,
@@ -124,7 +144,8 @@ def _books(cfg: Config, maps: list[ProductMap]) -> dict[CurveKey, EexBook | None
             continue
         path = eex_path(cfg, m)
         if path is None:
-            get_logger().warning(f"{m.label}: no EEX mapping -> own VWAPs + contract reconstruction only")
+            get_logger().warning(f"{m.label}: no EEX mapping -> own VWAPs "
+                                 f"(contract reconstruction enabled: {cfg.layer_arbitrage})")
             books[m.key] = None
             continue
         if path in cache:
@@ -329,7 +350,8 @@ def cmd_refill(cfg: Config, a) -> int:
     _out(f"Refill {start} -> {end} | VWAPs: {len(vw)} rows | EEX starts on {first_eex}")
     _out(_layers(cfg))
     if first_eex and start < first_eex:
-        get_logger().warning(f"no EEX before {first_eex}: those dates use own VWAPs + contract reconstruction only")
+        get_logger().warning(f"no EEX before {first_eex}: those dates use own VWAPs "
+                             f"(contract reconstruction enabled: {cfg.layer_arbitrage})")
     res = CurveFiller(cfg, vw, maps, books).run(start, end)
     _require_complete(res)
     enriched = enrich_input(raw, res.filled, cfg, maps, start, end)

@@ -202,7 +202,7 @@ def test_objective_weights_curves_equally_and_reports_units_separately(dataset, 
     assert report.loc["GBP/MWh", "n_paired"] == 2 * report.loc["EUR/MWh", "n_paired"]
 
 
-@pytest.mark.parametrize("failure", ["engine", "duplicate", "missing_pair", "different_cases", "nonfinite"])
+@pytest.mark.parametrize("failure", ["engine", "duplicate", "different_cases", "different_truth", "nonfinite"])
 def test_candidate_failure_aborts_instead_of_selecting_a_partial_winner(dataset, monkeypatch, failure):
     def broken(self, start, end, loo=False):
         rows = fake_loo(start, end, 1.0, 2.0)
@@ -212,10 +212,10 @@ def test_candidate_failure_aborts_instead_of_selecting_a_partial_winner(dataset,
                 errors = [dict(product="P", phase="prepare")]
             elif failure == "duplicate":
                 rows = pd.concat([rows, rows.iloc[[0]]], ignore_index=True)
-            elif failure == "missing_pair":
-                rows = rows.iloc[1:].copy()
             elif failure == "different_cases":
                 rows = rows[rows["reference_date"] != start].copy()
+            elif failure == "different_truth":
+                rows.loc[0, "own"] = 123.0
             else:
                 rows.loc[0, "pred"] = float("inf")
         return SimpleNamespace(errors=errors, loo=rows)
@@ -223,3 +223,124 @@ def test_candidate_failure_aborts_instead_of_selecting_a_partial_winner(dataset,
     monkeypatch.setattr(CurveFiller, "run", broken)
     with pytest.raises(ValueError):
         tune(dataset, {"basis_mode": ["auto", "ratio"]})
+
+
+def test_common_warmup_abstentions_are_reported_without_filling_with_eex(dataset, monkeypatch):
+    def warming_up(self, start, end, loo=False):
+        rows = fake_loo(start, end, 1.0, 2.0)
+        missing_days = set(pd.bdate_range(start, end).date[:2])
+        absent = rows["method"].eq("pipeline_configured") & rows["reference_date"].isin(missing_days)
+        return SimpleNamespace(errors=[], loo=rows[~absent])
+
+    monkeypatch.setattr(CurveFiller, "run", warming_up)
+    result = tune(dataset)
+    assert result.metadata["calibration_n_baseline"] == 9
+    assert result.metadata["calibration_n_available"] == result.metadata["calibration_n_paired"] == 7
+    assert result.metadata["calibration_n_missing"] == 2
+    overall = result.calibration_report.query("scope == 'overall'")
+    assert (overall["coverage"] == 7 / 9).all()
+    assert (overall["score"] == 0.5).all()
+    assert result.metadata["validation_n_paired"] == 1
+    assert result.metadata["validation_n_missing"] == 2
+    assert result.metadata["validation_coverage"] == 1 / 3
+
+
+def test_maximum_coverage_precedes_accuracy_so_abstention_cannot_win(dataset, monkeypatch):
+    def selective(self, start, end, loo=False):
+        rows = fake_loo(start, end, 0.0 if self.cfg.basis_mode == "auto" else 10.0, 20.0)
+        if self.cfg.basis_mode == "auto":
+            missing_days = set(pd.bdate_range(start, end).date[:2])
+            rows = rows[~(rows["method"].eq("pipeline_configured")
+                          & rows["reference_date"].isin(missing_days))]
+        return SimpleNamespace(errors=[], loo=rows)
+
+    monkeypatch.setattr(CurveFiller, "run", selective)
+    result = tune(dataset, {"basis_mode": ["auto", "ratio"]})
+    assert result.selected_config["basis_mode"] == "ratio"
+    overall = result.calibration_report.query("scope == 'overall'").set_index("basis_mode")
+    assert overall.loc["auto", "score"] == 0.0
+    assert not overall.loc["auto", "eligible_for_selection"]
+    assert overall.loc["ratio", "score"] == 0.5
+    assert overall.loc["ratio", "eligible_for_selection"]
+    assert overall.loc["ratio", "n_available"] == 9
+    assert (overall["n_paired"] == 7).all()
+
+
+def test_equal_coverage_compares_only_predictions_common_to_all_candidates(dataset, monkeypatch):
+    def different_gaps(self, start, end, loo=False):
+        auto = self.cfg.basis_mode == "auto"
+        rows = fake_loo(start, end, 1.0 if auto else 2.0, 10.0)
+        days = list(pd.bdate_range(start, end).date)
+        absent_day, unshared_day = (days[0], days[1]) if auto else (days[1], days[0])
+        model = rows["method"].eq("pipeline_configured")
+        # A very large error predicted only by auto is outside the common
+        # accuracy sample, and neither candidate gains a coverage advantage.
+        if auto:
+            rows.loc[model & rows["reference_date"].eq(unshared_day), "pred"] = 1000.0
+        rows = rows[~(model & rows["reference_date"].eq(absent_day))]
+        return SimpleNamespace(errors=[], loo=rows)
+
+    monkeypatch.setattr(CurveFiller, "run", different_gaps)
+    result = tune(dataset, {"basis_mode": ["auto", "ratio"]})
+    assert result.selected_config["basis_mode"] == "auto"
+    overall = result.calibration_report.query("scope == 'overall'").set_index("basis_mode")
+    assert (overall["n_available"] == 8).all() and (overall["n_paired"] == 7).all()
+    assert overall.loc["auto", "score"] == 0.1
+    assert overall.loc["ratio", "score"] == 0.2
+    assert result.metadata["calibration_n_available"] == 8
+    assert result.metadata["calibration_n_paired"] == 7
+
+
+def test_no_common_calibration_predictions_has_clear_error(dataset, monkeypatch):
+    def no_overlap(self, start, end, loo=False):
+        rows = fake_loo(start, end, 1.0, 2.0)
+        if self.cfg.basis_mode == "auto":
+            rows = rows[rows["method"].eq("eex")]
+        return SimpleNamespace(errors=[], loo=rows)
+
+    monkeypatch.setattr(CurveFiller, "run", no_overlap)
+    with pytest.raises(ValueError, match="common to every candidate"):
+        tune(dataset, {"basis_mode": ["auto", "ratio"]})
+
+
+def test_holdout_with_no_predictions_reports_zero_coverage_and_no_error_score(dataset, monkeypatch):
+    _, _, _, _, days = dataset
+
+    def unavailable_holdout(self, start, end, loo=False):
+        rows = fake_loo(start, end, 1.0, 2.0)
+        if start == days[-3]:
+            rows = rows[rows["method"].eq("eex")]
+        return SimpleNamespace(errors=[], loo=rows)
+
+    monkeypatch.setattr(CurveFiller, "run", unavailable_holdout)
+    result = tune(dataset, {"basis_mode": ["auto"]})
+    assert result.metadata["validation_n_baseline"] == 3
+    assert result.metadata["validation_n_available"] == result.metadata["validation_n_paired"] == 0
+    assert result.metadata["validation_n_missing"] == 3
+    assert result.metadata["validation_coverage"] == 0.0
+    assert pd.isna(result.metadata["validation_score"])
+    assert result.metadata["validation_paired_start"] is None
+    assert result.metadata["validation_paired_end"] is None
+    report = result.validation_report.set_index("scope")
+    assert report.loc["unit", "unit"] == "EUR/MWh"
+    assert report.loc["unit", "n_missing"] == 3
+    assert pd.isna(report.loc["unit", "mae_model"])
+    assert pd.isna(report.loc["unit", "mae_eex"])
+
+
+def test_coverage_is_reported_separately_for_units_with_no_predictions(dataset, monkeypatch):
+    def missing_unit(self, start, end, loo=False):
+        euro = fake_loo(start, end, 2.0, 4.0)
+        pound = fake_loo(start, end, 3.0, 6.0, units=("GBP/MWh",))
+        pound = pound[pound["method"].eq("eex")]
+        return SimpleNamespace(errors=[], loo=pd.concat([euro, pound], ignore_index=True))
+
+    monkeypatch.setattr(CurveFiller, "run", missing_unit)
+    result = tune(dataset, {"basis_mode": ["auto"]})
+    assert result.metadata["calibration_coverage"] == 0.5
+    report = result.calibration_report.query("scope == 'unit'").set_index("unit")
+    assert report.loc["GBP/MWh", "coverage"] == 0.0
+    assert report.loc["GBP/MWh", "n_missing"] == 9
+    assert report.loc["GBP/MWh", "n_paired"] == 0
+    assert pd.isna(report.loc["GBP/MWh", "score"])
+    assert report.loc["EUR/MWh", "coverage"] == 1.0

@@ -121,11 +121,14 @@ def test_ratio_floor_boundary_is_inclusive(cfg, target_eex):
     assert "auto_additive_low_eex" not in row["flag"]
 
 
-def test_no_anchors_or_history_uses_unadjusted_eex_in_ratio_mode(cfg):
+def test_no_anchors_or_sufficient_history_leaves_target_missing_in_ratio_mode(cfg):
     row = target(run(cfg, [], {DAY: {"M+2": 120.0}}))
     assert row["basis_mode"] == "ratio"
-    assert row["price"] == 120.0 and row["source"] == "eex"
-    assert row["estimation_method"] == "eex"
+    assert math.isnan(row["price"]) and row["source"] == "missing"
+    assert row["eex_settle"] == 120.0
+    assert row["estimation_method"] == "unavailable"
+    assert row["data_origin"] == "missing"
+    assert "eex_fallback_unavailable" in row["flag"]
 
 
 @pytest.mark.parametrize("hist_layer,max_age,expected_mode", [
@@ -143,8 +146,11 @@ def test_additive_only_history_is_used_only_when_available_and_enabled(cfg, hist
         assert row["estimation_method"] == "additive_history"
         assert "auto_additive_history_only" in row["flag"]
     else:
-        assert row["price"] == 120.0
-        assert row["estimation_method"] == "eex"
+        assert math.isnan(row["price"]) and math.isnan(row["basis_hist"])
+        assert row["source"] == "missing"
+        assert row["estimation_method"] == "unavailable"
+        assert "auto_additive_history_only" not in row["flag"]
+        assert "eex_fallback_unavailable" in row["flag"]
 
 
 def test_ratio_history_is_not_overwritten_by_additive_only_observations(cfg):
@@ -183,7 +189,9 @@ def test_auto_history_skill_evaluates_ratio_and_additive_independently(cfg):
     # The historical ratio badly overpredicts day two, while the additive
     # difference remains exactly ten. The two policies must reach different decisions.
     assert ratio["basis_mode"] == "ratio"
-    assert ratio["price"] == 100.0 and math.isnan(ratio["basis_hist"])
+    assert math.isnan(ratio["basis_hist"]) and math.isnan(ratio["price"])
+    assert ratio["source"] == "missing"
+    assert "eex_fallback_unavailable" in ratio["flag"]
     assert normal["basis_mode"] == "additive"
     assert normal["price"] == pytest.approx(110.0)
     assert "auto_additive_history_only" in normal["flag"]

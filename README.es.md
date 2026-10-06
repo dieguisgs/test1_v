@@ -10,6 +10,8 @@ Completa los precios que faltan para cada **fecha de referencia, producto, regi�
 tenor objetivo**, utilizando VWAPs observados y settlements de EEX. El output enriquecido
 conserva filas y columnas originales, añade puntos ausentes e indica origen y método del precio.
 
+Los nueve casos de procedencia del precio, con ejemplos, se explican en la sección 0.9 de [ALGORITMO.md](ALGORITMO.md).
+
 La identidad de una curva es **`(product, region, unit)`**. Un mismo nombre en otra región o
 unidad tiene mapeo, anclas, historia y resultados independientes. Los valores originales se
 conservan; el cruce interno recorta espacios exteriores sin cambiar mayúsculas ni escritura.
@@ -17,10 +19,10 @@ Región/unidad vacías son valores literales, nunca comodines. El producto no pu
 
 ## Configuración mínima para empezar
 
-No necesitas ajustar las 46 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
+No necesitas ajustar las 51 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
 no son parámetros estadísticos. Para arrancar, revisa `[paths]`, genera y revisa el mapping,
 elige `[targets].tenors` y deja `method.basis_mode = "auto"`. Mantén los demás valores
-iniciales, incluidas `correlation = false` y `cross = false`.
+iniciales, incluidas `correlation = false`, `cross = false` y `arbitrage = false`.
 
 La referencia completa documenta controles avanzados para auditoría y cambios deliberados.
 `tune` admite seis controles del modelo, pero sin opciones adicionales compara solo los tres
@@ -120,7 +122,7 @@ ratio exigen `abs(EEX) >= ratio_eex_floor`, `Own/EEX > 0` y
 `abs(Own/EEX − 1) <= max_ratio_deviation`; additive admite pares finitos que superen los
 filtros comunes de volumen/desviación. −10/−12 puede ser un ancla ratio válida; 2/0 no.
 Un objetivo auto próximo a cero elige additive aunque otras anclas permitan usar ratio.
-Forzando ratio, un objetivo con EEX = 0 sigue dando 0.
+Con un ajuste ratio disponible, EEX objetivo = 0 da 0. Sin componentes de ajuste se usa el respaldo suavizado, aunque el modo seleccionado sea ratio.
 
 `max_ratio_deviation` también puede rechazar anclas ratio aunque sus precios sean distintos de
 cero y tengan el mismo signo. Auto puede usar después sus diferencias aditivas si pasan los
@@ -137,6 +139,157 @@ diferencia con `w = 0.5`: precio = `1 + 0.5 × 2 = 2`. Sin esa reducción, la f�
 W depende en realidad del volumen y la distancia de entrega. El documento del algoritmo
 detalla las ponderaciones y el aprendizaje; auto es una regla que debe validarse, no una
 garantía de menor error predictivo.
+
+## Respaldo EEX suavizado cuando no hay ajuste propio
+
+Este respaldo sustituye la antigua devolución directa del settlement. **Solo interviene
+si no hay componente local, histórico permitido ni cross utilizable** y existe una referencia
+EEX actual admitida por la regla de antigüedad. Los originales y los ajustes aprendidos siguen
+su cálculo habitual. Un ajuste disponible cuyo valor sea exactamente cero sigue siendo un
+ajuste: no se cambia de rama por coincidir numéricamente con EEX.
+
+En lenguaje de negocio: cuando no sabemos cómo desplazar EEX hacia tu nivel, evitamos copiar
+una sola publicación. Estimamos el nivel a partir de varias publicaciones del mismo contrato;
+para meses lejanos, trasladamos desde un mes cercano las diferencias históricas entre meses.
+No usamos operaciones propias ni estimaciones anteriores para entrenar este respaldo.
+
+### Ventanas completas, contratos fijos y medias
+
+Se toman las últimas publicaciones distintas del archivo EEX hasta la fecha de referencia,
+terminando en el último snapshot permitido por `eex.max_stale_days`. Son **observaciones
+publicadas**, no días naturales: repetir un settlement antiguo en varios días sin publicación
+no aumenta la muestra. Nunca se toman publicaciones futuras.
+
+Cada precio se refiere al **mismo periodo absoluto de entrega** en todas las publicaciones.
+Para cada fecha, Pricer puede obtenerlo por contrato exacto, strip o residuo, con las horas
+del perfil. Si falta ese periodo en cualquiera de las últimas N publicaciones globales del
+archivo, la ventana falla: no se salta la fecha para buscar una más antigua, no se arrastra
+un precio y no se utiliza una ventana parcial.
+
+- `simple`: media aritmética con pesos `1/N`.
+- `ewma`, por defecto: media exponencial **finita y normalizada** de N observaciones,
+  `peso_j = 2^(-edad_j/halflife) / suma_pesos`; edad 0 es la última publicación,
+  1 la anterior, etc. No es la EWMA recursiva del basis propio.
+- `ewma_halflife=2` significa que una publicación dos observaciones anterior recibe la mitad
+  del peso sin normalizar de la última. No significa dos días naturales.
+
+### Meses: nivel cercano y diferencias entre meses
+
+Con `anchor_months=2`, los meses ancla son **M0, mes natural de la fecha de referencia, y M1**.
+Cada uno se promedia por separado durante `price_window=5` publicaciones cuando se solicita.
+M2 y siguientes parten del **último mes ancla, M1**, y añaden sucesivamente:
+
+```text
+precio(M2) = media_precio(M1) + media_simple_9(EEX(M2) − EEX(M1))
+precio(M3) = precio(M2)       + media_simple_9(EEX(M3) − EEX(M2))
+...
+```
+
+Cada spread utiliza ambos precios de la **misma publicación**, durante las últimas
+`spread_window=9` publicaciones. Los spreads son diferencias de precios EEX crudos; no se
+sustituye el spread del último día por uno previamente suavizado. Así se evita volver a suavizar un dato ya promediado
+y se mantienen separadas la media del nivel y la media de spreads. La media de spreads es siempre simple, incluso con precios EWMA.
+
+Para calcular M3 se necesita la ventana completa de M1 y las ventanas completas M1→M2 y
+M2→M3. No hace falta la media de M0, porque su cálculo es independiente. Si falla un eslabón,
+no se publica la cascada incompleta. Los meses se cuentan desde la fecha de referencia,
+no desde la fecha de una publicación antigua ni desde el primer tenor de targets.
+Con `anchor_months=1`, la cascada parte de M0; con 3, parte de M2.
+
+Day, Week, Weekend, Quarter, Season, Year, BOM y BOW se promedian **directamente para su propio
+periodo absoluto** durante la ventana de precios. No se sustituyen automáticamente por los
+meses suavizados. Por tanto, el método conserva diferencias mensuales históricas pero no
+fuerza que un trimestre coincida con el promedio de los meses; las inconsistencias se reportan.
+
+### Ejemplo reproducible: 5 publicaciones de precios y 9 de spreads
+
+Fecha de referencia: 30-09-2026; M1=octubre, M2=noviembre, M3=diciembre. Precios didácticos:
+
+| Publicación | Octubre | Noviembre | Diciembre | Nov−Oct | Dic−Nov |
+|---|---:|---:|---:|---:|---:|
+| 18-09 | 92 | 102 | 103 | 10 | 1 |
+| 21-09 | 94 | 105 | 107 | 11 | 2 |
+| 22-09 | 96 | 108 | 111 | 12 | 3 |
+| 23-09 | 98 | 111 | 115 | 13 | 4 |
+| 24-09 | 100 | 114 | 119 | 14 | 5 |
+| 25-09 | 102 | 117 | 123 | 15 | 6 |
+| 28-09 | 104 | 120 | 127 | 16 | 7 |
+| 29-09 | 106 | 123 | 131 | 17 | 8 |
+| 30-09 | 108 | 126 | 135 | 18 | 9 |
+
+Las últimas cinco observaciones de octubre son 100,102,104,106,108. Su media simple es 104.
+Con EWMA de vida media 2, los pesos normalizados, del más antiguo al reciente, son
+0.088947075, 0.125790159, 0.177894149, 0.251580318 y 0.355788298: media **105.318945**.
+El spread medio Nov−Oct de las nueve publicaciones es **14** y Dic−Nov es **5**.
+Resultado EWMA: M1 **105.318945**, M2 **119.318945**, M3 **124.318945**.
+Con simple: M1 **104**, M2 **118**, M3 **123**.
+
+No se publica noviembre=126 solo por ser el último settlement. Si el cálculo suavizado
+coincide con el settlement por casualidad —por ejemplo precios constantes— se conserva
+esa coincidencia: no se añade una perturbación artificial. Ventanas largas pueden retrasar
+cambios de régimen; ventanas cortas pueden seguir más ruido. Mantener los meses absolutos
+evita mezclar etiquetas que rotan, pero no garantiza modelar toda la estacionalidad ni mejorar
+la predicción. Se necesita validación real y medir también cobertura.
+
+### Los cinco controles y sus alternativas de CLI
+
+```toml
+[eex_fallback]
+price_method = "ewma"
+price_window = 5
+ewma_halflife = 2.0
+spread_window = 9
+anchor_months = 2
+```
+
+| Clave | Defecto | Qué cambia y qué límites tiene |
+|---|---|---|
+| `eex_fallback.price_method` | `"ewma"` | `simple` da el mismo peso a las N observaciones; `ewma` favorece las recientes. Solo esas dos opciones. No cambia la media simple de spreads |
+| `eex_fallback.price_window` | `5` | Entero ≥2. Mayor usa más publicaciones y puede suavizar más, pero exige mayor cobertura; menor responde con menos memoria. No son días naturales |
+| `eex_fallback.ewma_halflife` | `2.0` | Finito >0. Mayor reparte más peso hacia observaciones antiguas; menor concentra en las recientes. Solo cambia precios con método ewma; debe seguir siendo válido con simple |
+| `eex_fallback.spread_window` | `9` | Entero ≥2. Ventana completa de diferencias mensuales simultáneas. Mayor usa más historia y exige más cobertura. Solo interviene en cascadas mensuales |
+| `eex_fallback.anchor_months` | `2` | Entero ≥1 desde M0. Mayor promedia más meses individualmente y retrasa el inicio de la cascada; no es un número de VWAPs propios |
+
+Estos controles no afectan a originales ni a precios con ajuste local/histórico/cross.
+Las ventanas de precio y spread son independientes: no se exige que una sea mayor que la otra.
+La antigüedad máxima controla el último snapshot permitido, no convierte las ventanas en
+ventanas de días naturales. Las 51 claves del config incluyen estos cinco controles.
+
+En `daily`, `refill`, `catchup`, `backtest` y `tune` se pueden sustituir para una ejecución:
+
+| Opción | Control sustituido |
+|---|---|
+| `--eex-price-method simple` o `ewma` | `price_method` |
+| `--eex-price-window N` | `price_window` |
+| `--eex-ewma-halflife H` | `ewma_halflife` |
+| `--eex-spread-window N` | `spread_window` |
+| `--eex-anchor-months N` | `anchor_months` |
+
+Por ejemplo, `python run.py daily --eex-price-method simple --eex-price-window 5`.
+Si se omiten, se usa TOML; no se modifica el archivo. En tune estos valores quedan fijos
+para todos los candidatos: no añaden dimensiones a la rejilla de seis controles.
+
+### Resultado, auditoría y actualización de salidas anteriores
+
+La fuente es `eex+smooth`; los métodos son `eex_price_simple`, `eex_price_ewma`,
+`eex_month_cascade_simple` y `eex_month_cascade_ewma`. `eex_settle` conserva la referencia
+EEX sin suavizar para auditoría. `basis` y `local_weight` quedan vacíos: no describen esta
+media. `basis_mode` indica la selección previa ratio/additive, **no una fórmula aplicada
+al respaldo suavizado**. El JSON `eex_fallback_trace` —`curve_eex_fallback_trace` en
+enriquecido— contiene periodos, fechas, precios, pesos y cada spread: permite rehacer el cálculo.
+
+Sin ventana completa se marca `eex_fallback_unavailable` y, por defecto, queda `missing`.
+Si se habilita la reconstrucción final de contratos, se intenta esa vía; sin una construcción
+válida, queda `missing`. El flag puede persistir aunque
+el arbitraje consiga precio. No se vuelve al settlement crudo. El settlement sin ajustar
+sigue siendo el benchmark `eex` del backtest y de hist-auto; benchmark y salida de producción
+son conceptos distintos.
+
+Para aplicar este cambio a resultados antiguos, ejecuta `refill --from ... --to ...` o
+`daily --date ...` sobre las fechas elegidas. Catchup solo recupera grupos pendientes:
+una fila existente, incluso `missing` o una estimación de una versión anterior, ya cuenta
+procesada y no se recalcula solo por actualizar el programa.
+
 
 ## Referencia completa de configuración
 
@@ -161,11 +314,22 @@ carpeta del config, salvo `eex_file` del mapeo, que parte de `eex_curves_dir`.
 | `hist` | `"auto"` | `"on"` usa historia vigente; `"off"` la desactiva; `"auto"` compara errores anteriores frente a EEX, por separado para cada modo/grupo |
 | `correlation` | `false` | `true` sustituye pesos fijos entre grupos por relaciones medidas entre sorpresas, con un peso previo de respaldo |
 | `cross` | `false` | `true` permite sorpresas de otros productos correlacionados; necesita historia interna y EEX del objetivo, con estadísticas separadas por modo |
-| `arbitrage` | `true` | `false` apaga la construcción por strips/residuos con contratos ya disponibles cuando EEX no puede valorar el objetivo |
+| `arbitrage` | `false` | `true` activa la reconstrucción final con contratos propios/estimados disponibles cuando no hay referencia EEX calculable o no puede suavizarse el respaldo EEX sin ajuste |
 
 Apagar capas no elimina originales. `hist = off` no apaga por sí solo cross: cross puede usar
 su historia interna para calcular sorpresas, sin sumar esa media al precio. Elegir additive
 en auto no enciende una capa local/hist/cross apagada.
+
+Para activar la reconstrucción final, cambia a `arbitrage = true` en la sección `[layers]`
+existente. Con el valor inicial `false`, la referencia EEX sigue calculándose mediante
+`exact`, `strip` y `residual`; solo se desactiva la reconstrucción posterior con contratos
+propios o ya estimados. El histórico guarda un **basis respecto a EEX**, por lo que necesita
+una referencia EEX utilizable y una historia permitida. Este orden depende de la información
+disponible; no clasifica un método como intrínsecamente mejor que otro.
+
+`own_equivalent_period` (own reused) es otro caso: completa una etiqueta equivalente usando
+un precio propio de la misma identidad, fecha de referencia y periodo de entrega. No arrastra
+el precio de ayer ni depende del interruptor `arbitrage`.
 
 ### Antigüedad EEX (`[eex]`)
 
@@ -283,7 +447,8 @@ sin mapear se indican y no se procesan; sus originales permanecen en el enriquec
 `fill`/`helper` requieren además `eex_file` no vacío: si no hay archivo asignado, la identidad
 se excluye y se señala con `mapping_unassigned` aunque `use` esté activado. Es distinto de
 tener una ruta asignada cuyo archivo no exista o no contenga cotizaciones para esa fecha:
-esa identidad sí está activa, se avisa de los datos ausentes y puede usar VWAPs propios/arbitraje.
+esa identidad sí está activa, se avisa de los datos ausentes y puede usar VWAPs propios.
+La reconstrucción final también está disponible si se activa expresamente `arbitrage`.
 
 **El mapeo se edita a mano**, con un editor de texto o Excel. La cabecera es
 `product,region,unit,use,area,profile,eex_file,hours,timezone,comment`. Conserva las identidades
@@ -381,10 +546,10 @@ Los resultados principales son `output/enriched_history.csv` y `output/enriched/
 |---|---|
 | `curve_price` | Precio final utilizable. Lee esta columna cuando el `vwap` original estuviera vacío o fuera inválido. |
 | `data_origin` | `original`, `estimated` o `missing`. |
-| `estimation_method` | Por ejemplo, `ratio_local`, `ratio_local_history`, `additive_local`, `eex`, `contract_strip`, `contract_residual` o `none`. |
+| `estimation_method` | Por ejemplo, `ratio_local`, `ratio_local_history`, `additive_local`, `eex_price_ewma`, `contract_strip`, `contract_residual` o `none`. |
 | `curve_row_type` | `original`, `original_invalid` o `added`. |
 | `curve_product`, `curve_region`, `curve_unit` | Identidad completa normalizada usada en los cruces; los valores originales quedan intactos. |
-| `curve_basis_mode` | Fórmula aplicada: `ratio` o `additive`. |
+| `curve_basis_mode` | Modo seleccionado; no implica aplicar basis a originales o al respaldo `eex+smooth`. |
 | `curve_configured_basis_mode` | Opción solicitada: `auto`, `ratio` o `additive`. |
 | `curve_flags` | Incluye el motivo de selección auto cuando se eligió additive para una estimación con EEX. |
 | Otras columnas `curve_*` | Claves de referencia, fuentes, detalles del cálculo y avisos. |
@@ -400,7 +565,7 @@ python -B -m pytest -p no:cacheprovider
 python run.py backtest
 ```
 
-Las pruebas y los datos sintéticos validan la mecánica, no demuestran la precisión sobre tus datos reales de mercado. Es una base de complejidad media que utiliza observaciones propias, EEX, ajustes locales/históricos y arbitraje. Mantén `cross = false` y `correlation = false` hasta que la validación con datos reales justifique añadir esas capas. Los documentos del algoritmo enlazados explican los cálculos y sus límites.
+Las pruebas y los datos sintéticos validan la mecánica, no demuestran la precisión sobre tus datos reales de mercado. Es una base de complejidad media que utiliza observaciones propias, EEX, ajustes locales/históricos y reconstrucción final opcional. Mantén `cross = false`, `correlation = false` y `arbitrage = false` hasta que la validación con datos reales justifique activar esas capas. Los documentos del algoritmo enlazados explican los cálculos y sus límites.
 
 El backtest empareja por fecha/producto/region/unit/tenor. Los informes de error y la detección
 de convenciones separan unidades, sin promediar errores EUR/MWh y GBP/MWh. Compara
@@ -448,22 +613,37 @@ config. Con los valores por defecto se prueban tres modos, conservando los otros
 Cambiar parámetros como caducidad o volumen requiere una comparación explícita adicional;
 tune no explora automáticamente todo el inventario de configuración.
 
-**Cómo decide cuál es mejor:**
+**Cómo decide cuál es mejor: primero cobertura, después error comparable.**
 
-1. Ordena las fechas propias elegibles de curvas fill activas y aparta las últimas N para
-   validación. En las anteriores calibra todas las combinaciones. No utiliza los errores
-   de validación para escoger el ganador.
-2. Todos los candidatos deben evaluarse sobre exactamente las mismas claves propias y
-   referencia EEX. Para cada curva calcula `MAE_modelo / MAE_EEX`, ambos contra el **mismo
-   VWAP propio ocultado**. Después promedia esos cocientes con igual peso por curva.
-3. Gana el menor promedio de calibración. 1 iguala EEX; 0.7 significa un error normalizado
-   medio por curva un 30 % inferior al de EEX, **no** un 30 % menos de MAE global en moneda.
-   Si EEX acierta perfectamente una curva, el cociente se define como 1 si el modelo también
-   acierta y como infinito si falla. En empate gana el primero en el orden de la rejilla.
-4. Solo entonces evalúa al ganador sobre las fechas posteriores reservadas, con parámetros
-   fijos. La memoria sigue avanzando cronológicamente con los originales ya observados,
-   incluso dentro de la validación: cada fecha utiliza solo historia anterior. No se usa
-   información de precios futura.
+1. Ordena las fechas propias elegibles de curvas fill activas y reserva las últimas N para
+   validación. Calibra todas las combinaciones sobre las anteriores. El holdout no elige ganador.
+2. Define un universo idéntico de observaciones con VWAP ocultado y benchmark EEX disponible.
+   Los casos sin benchmark EEX no entran en este objetivo relativo. Para cada candidato cuenta
+   `n_baseline`, `n_available` (predicciones finitas), `n_missing=n_baseline−n_available` y
+   `coverage=n_available/n_baseline`. Las abstenciones por ventanas incompletas son visibles,
+   no se eliminan silenciosamente del denominador.
+3. Solo son elegibles los candidatos con **máxima cobertura de calibración**. Calcula precisión
+   sobre la **intersección de predicciones de todos los candidatos**, incluidos los de menor
+   cobertura: son exactamente los mismos casos para todos. `n_paired` puede ser menor que
+   `n_available`. Exige al menos dos fechas distintas en esa intersección; si no las hay,
+   aborta y pide revisar datos/rejilla en lugar de comparar muestras distintas.
+4. Dentro de la máxima cobertura, gana el menor promedio por curva de `MAE_modelo/MAE_EEX`,
+   ambos contra el **mismo VWAP propio ocultado**. Cada curva pesa igual. Score 1 iguala EEX;
+   0.7 significa un 30 % menos de error normalizado medio por curva, no un 30 % menos de MAE
+   global en moneda. Si EEX es perfecto: cociente 1 si el modelo también, infinito si falla.
+   Empate de cobertura y score: primer candidato de la rejilla.
+5. Evalúa **solo al ganador** en las fechas posteriores, con parámetros fijos. Su memoria
+   avanza causalmente con originales observados de fechas anteriores, incluso dentro del
+   holdout. El score utiliza sus pares disponibles y reporta cobertura respecto a todo el
+   universo EEX. Si no predice ninguno, cobertura 0, `n_paired=0`, errores y score no
+   evaluables (vacíos/NaN en CSV, null en JSON); no se inventa un score ni se oculta el fallo
+   de cobertura. Las ventanas incompletas son abstenciones; un error interno sigue abortando.
+
+Por ejemplo, un candidato que cubre 90 de 100 casos tiene prioridad sobre otro que cubre
+80, aunque este segundo tenga menor error. Entre dos que cubren 90 se compara score en la
+intersección común de toda la rejilla. Por ello hay que leer **cobertura y precisión juntas**,
+y no asumir que la mejor cifra aislada es el candidato elegido. Los cinco parámetros
+`eex_fallback` quedan fijos en la búsqueda, incluidos overrides CLI; no son nuevas dimensiones.
 
 Escribe `output/tuning_calibration.csv`, `tuning_validation.csv` y `tuning_selected.json`.
 Los CSV muestran score, `normalized_skill=1-score`, número de parejas y errores MAE/RMSE/sesgo
@@ -476,7 +656,7 @@ una ruta/configuración por sí sola no conserva sus contenidos.
 de negocio la acepta, copia manualmente los valores seleccionados a las secciones existentes.
 Un fallo de cualquier candidato aborta la evaluación; no se publica una selección parcial.
 
-Es el mejor candidato **entre los probados, en calibración**, no una garantía para el futuro.
+Es el mejor candidato **entre los probados, con máxima cobertura de calibración y mejor score común**, no una garantía para el futuro.
 La validación oculta puntos que sí tuvieron precio: puede favorecer periodos líquidos y no
 demuestra el comportamiento cuando falta una curva diaria entera, ni conoce la verdad de los
 huecos reales. No reajustes repetidamente contra el mismo tramo reservado y después lo

@@ -60,6 +60,9 @@ def test_tune_exports_auditable_selection_without_changing_input_config_or_curve
     validation = pd.read_csv(output / "tuning_validation.csv")
     selected = json.loads((output / "tuning_selected.json").read_text(encoding="utf-8"))
     assert len(calibration[calibration["scope"] == "overall"]) == 3
+    assert {"n_baseline", "n_available", "n_missing", "coverage", "eligible_for_selection"} <= set(calibration)
+    assert (calibration["coverage"] == 1.0).all()
+    assert (validation["n_missing"] == 0).all()
     assert set(validation["basis_mode"]) == {"additive"}
     assert selected["selected_parameters"]["method"]["basis_mode"] == "additive"
     assert selected["selected_parameters"]["layers"]["hist"] == "off"

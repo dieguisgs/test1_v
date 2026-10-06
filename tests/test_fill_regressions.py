@@ -72,10 +72,13 @@ def test_unstable_ratio_preserves_original_without_using_it_as_anchor(cfg, own_p
     assert output.loc["M+1", "price"] == own_price
     assert output.loc["M+1", "source"] == "own"
     assert output.loc["M+1", "flag"] == "anchor_excluded"
-    assert output.loc["M+2", "source"] == "eex"
-    assert output.loc["M+2", "price"] == 100.0
+    assert output.loc["M+2", "source"] == "missing"
+    assert pd.isna(output.loc["M+2", "price"])
+    assert pd.isna(output.loc["M+2", "basis_local"])
+    assert "eex_fallback_unavailable" in output.loc["M+2", "flag"]
     assert np.isfinite(result.loo[["pred", "error"]].to_numpy()).all()
-    assert "pipeline_configured" in set(result.loo.method)
+    assert "eex" in set(result.loo.method)  # Raw EEX remains an evaluation baseline.
+    assert "pipeline_configured" not in set(result.loo.method)
 
 
 def test_ratio_accepts_same_sign_negative_anchor(cfg):
@@ -139,8 +142,10 @@ def test_stale_eex_does_not_train_history_and_old_basis_expires(cfg):
     output = result.filled.set_index(["reference_date", "tenor"])
     assert output.loc[(stale, "M+1"), "price"] == 200.0
     assert output.loc[(next_day, "M+2"), "price"] == pytest.approx(110.0)
-    assert output.loc[(expired, "M+2"), "source"] == "eex"
-    assert output.loc[(expired, "M+2"), "price"] == 100.0
+    assert output.loc[(expired, "M+2"), "source"] == "missing"
+    assert pd.isna(output.loc[(expired, "M+2"), "basis_hist"])
+    assert pd.isna(output.loc[(expired, "M+2"), "price"])
+    assert "eex_fallback_unavailable" in output.loc[(expired, "M+2"), "flag"]
 
 
 def test_filler_covariances_decay_by_calendar_days_between_observations(cfg):
@@ -216,7 +221,8 @@ def test_product_failure_is_reported_without_losing_healthy_product(cfg, monkeyp
     day = date(2026, 9, 30)
     maps = [_mapping("BAD"), _mapping("GOOD")]
     book = _book([(day, {"M+1": 100.0, "M+2": 100.0})])
-    engine = CurveFiller(cfg, _own([]), maps, {m.product: book for m in maps})
+    observations = _own([(day, "GOOD", "M+1", 110.0, 20.0)])
+    engine = CurveFiller(cfg, observations, maps, {m.product: book for m in maps})
     original = getattr(engine, method)
 
     def fail_one(series, *args, **kwargs):
@@ -229,7 +235,11 @@ def test_product_failure_is_reported_without_losing_healthy_product(cfg, monkeyp
     assert result.errors == [{"reference_date": day, "product": "BAD", "region": "", "unit": "",
                               "phase": phase}]
     assert set(result.filled["product"]) == {"GOOD"}
-    assert result.filled.price.eq(100.0).all()
+    output = result.filled.set_index("tenor")
+    assert output.loc["M+1", "source"] == "own"
+    assert output.loc["M+1", "price"] == 110.0
+    assert output.loc["M+2", "source"] == "eex+local"
+    assert 100.0 < output.loc["M+2", "price"] < 110.0
 
 
 def test_peak_weekend_quote_does_not_populate_zero_hour_bow(cfg):

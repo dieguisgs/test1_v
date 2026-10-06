@@ -14,15 +14,19 @@ Cómo se genera, cada día, la curva completa de un producto (por ejemplo DE Bas
 
 ---
 
+**Lectura rápida:** [casos paso a paso](#09-cada-caso-explicado-paso-a-paso) · [configuración completa](#14-referencia-completa-de-configuración-qué-controla-cada-decisión) · [auditoría de una fila](#12-auditoría-de-una-fila).
+
 ## Qué necesitas configurar y qué puedes dejar con los valores iniciales
 
-Las 46 entradas de `config.toml` no son 46 parámetros que debas optimizar: 19 son rutas,
+Las 51 entradas de `config.toml` no son 51 parámetros que debas optimizar: 19 son rutas,
 nombres de columnas y zonas horarias. Para un primer uso, basta con revisar las rutas,
 el mapping de identidades, los tenors objetivo y mantener el modo `auto`. Las capas
-`correlation` y `cross` permanecen desactivadas. Los controles avanzados se documentan
+`correlation`, `cross` y `arbitrage` permanecen desactivadas. Los controles avanzados se documentan
 para que una modificación sea consciente y auditable, no para exigir ajustes manuales.
 `tune` compara por defecto solo `auto`, `ratio` y `additive`; ampliar la búsqueda a sus
 otros cinco controles requiere indicarlo expresamente. El resto del TOML permanece fijo.
+
+**Cambio de respaldo:** sin ajuste propio utilizable, EEX se suaviza con ventanas completas de publicaciones; nunca se copia directamente como respaldo. La sección 16 explica medias, cascada mensual, controles y auditoría.
 
 ## 0. Entender el producto antes de leer las fórmulas
 
@@ -93,7 +97,7 @@ a precios: los modos mantienen memorias y estadísticas separadas.
 | Local W=4 + historia, k=1: cálculo implementado del ejemplo | **125.28** | **124.4** |
 | Local W=4 sin historia: respaldo de ajuste cero | `120×(1+0.8×0.05)=124.8` | `120+0.8×5=124` |
 | Sin anclas, solo historia permitida | `120×1.02=122.4` | `120+2=122` |
-| Sin ajuste local, histórico ni cross utilizable | **120** | **120** |
+| Sin ajuste local, histórico ni cross utilizable | Respaldo EEX suavizado de la sección 16; sin ventana, arbitraje opcional/missing | Igual: no se aplica ratio/additive al respaldo |
 
 Por eso copiar íntegramente el factor de un mes conocido no describe siempre el cálculo.
 `shrink_k` reduce el ajuste local. Cuanto mayor es W frente a k, más se acerca al ajuste
@@ -110,14 +114,14 @@ dentro de los casos que utilizan EEX.
 | 1. Original válido | VWAP numérico y finito | Conserva el precio, también cero/negativo | Puede no servir como ancla. Una entrega sin horas no recibe precio de curva, pero su original sigue intacto |
 | 2. Hueco con anclas de hoy | EEX y observaciones admisibles | Mezcla ajuste local con historia/cross permitidos, o con cero | Modo, peso, anclas, filtros y antigüedad EEX |
 | 3. Hueco con historia | EEX, sin ajuste local, memoria vigente/permitida | Aplica memoria; cross opcional puede contribuir | La memoria precede a la fecha y no está caducada |
-| 4. Solo referencia EEX | EEX, sin ajuste utilizable | Usa EEX tal cual | Es una estimación por referencia, no una operación |
+| 4. Solo referencia EEX | EEX, sin ajuste utilizable | Suaviza EEX con ventana completa; sin ella, arbitraje opcional/missing | Precios y spreads históricos; no copia el último settlement |
 | 5. Falta EEX exacto | Piezas EEX suficientes | Construye EEX por strip/residuo y después aplica la lógica de ajuste | Cobertura horaria y amplificación del residuo |
 | 6. No se puede obtener EEX | Contratos propios o ya calculados suficientes | Con `arbitrage=true`, construye por strip/residuo | No toda combinación es posible ni se fuerza la consistencia global |
 | 7. Información insuficiente | Ni referencia ni construcción válida, o entrega sin horas | Deja `missing` y un motivo | Un resultado sin precio puede estar correctamente procesado |
 | 8. Ratio no cumple las reglas | EEX objetivo pequeño, solo anclas aditivas o solo historia aditiva permitida | Auto elige additive con motivo; un modo forzado conserva su fórmula | Auto no detecta todos los outliers ni busca el modo de menor error |
 | 9. Fuera del alcance activado | Sin mapeo, `off` o `eex_file` vacío | No genera su curva estimada; conserva originales del enriquecido solicitado | Revisar mapping. Un tenor fuera de targets tampoco se crea si falta |
 
-Una ruta EEX **asignada pero sin datos** mantiene activa la curva: puede usar originales y
+Una ruta EEX **asignada pero sin datos** mantiene activa la curva: puede usar originales y, si está activado,
 arbitraje. **Sin fuente asignada**, queda excluida. Si no hay publicación EEX de hoy, puede
 utilizarse la última anterior según `[eex]`, nunca una futura. Se registra antigüedad y ese
 día no entrena memoria con esa referencia antigua.
@@ -151,7 +155,7 @@ filtros comunes. `max_ratio_deviation` protege ratio; `max_anchor_dev`, si se ac
 
 Ejemplo cerca de cero: propio 2 y EEX 0 dan diferencia aditiva +2. Un objetivo EEX 1 daría 3
 **si se aplicara íntegramente ese ajuste**; el motor conserva la mezcla con w e historia.
-EEX objetivo 0 activa additive en auto. Forzando ratio, `0×(1+ajuste)` sigue siendo 0:
+EEX objetivo 0 activa additive en auto. Con un ajuste ratio disponible, `0×(1+ajuste)` sigue siendo 0; sin componentes se usa el respaldo de la sección 16:
 el filtro de denominadores de anclas no modifica el precio EEX del objetivo.
 
 ### 0.6. La historia y los dos significados de «auto»
@@ -223,6 +227,314 @@ no alimentan el aprendizaje. La sección 5 detalla estos tres usos.
 
 ---
 
+### 0.9. Cada caso explicado paso a paso
+
+**Cómo leer esta sección.** Todos los ejemplos suponen una identidad exacta activada como
+`fill`, archivo EEX asignado y entrega con horas positivas. Son números didácticos, no
+operaciones reales. Para hacer visible cada suma, los ejemplos de ajustes fuerzan
+`basis_mode="additive"`; el valor entregado sigue siendo `auto`.
+
+No son nueve modelos que compiten por el mejor precio. El motor sigue una **secuencia de
+disponibilidad**. Conserva lo propio; si falta, intenta la referencia EEX con los componentes
+permitidos; sin componentes intenta suavizado; solo un objetivo pendiente puede pasar a
+arbitraje si lo activas. **`arbitrage=false` es el valor por defecto.**
+
+```mermaid
+flowchart TD
+    A["Objetivo activo con horas"] --> B{"¿Precio propio del mismo periodo?"}
+    B -->|Sí| C["Conservar original o reutilizar periodo equivalente"]
+    B -->|No| D{"¿Referencia EEX calculable?"}
+    D -->|Sí| E{"¿Componente local, histórico o cross utilizable?"}
+    E -->|Sí| F["Aplicar ajuste y registrar componentes"]
+    E -->|No| G{"¿Ventanas de suavizado completas?"}
+    G -->|Sí| H["EEX suavizado"]
+    G -->|No| I{"¿Arbitraje activado y piezas suficientes?"}
+    D -->|No| I
+    I -->|Sí| J["Reconstrucción por contratos"]
+    I -->|"No: defecto"| K["missing"]
+```
+
+`ratio`, `additive` y `auto` deciden **cómo expresar un ajuste**. Local, historia y cross
+deciden **de dónde sale la información**. Ratio +10 % con EEX 100 y peso local 0.6 da 106;
+additive +10 unidades da también 106 en ese ejemplo, pero con EEX 200 ya no son equivalentes.
+Auto elige fórmula por sus reglas, no por cuál predice mejor cada punto. El suavizado EEX y
+la reconstrucción de contratos son otras rutas: no aplican una fórmula de basis.
+
+`source` resume la ruta o componente dominante. `estimation_method` enumera los componentes
+disponibles que intervinieron; que aparezca `history` no significa que su valor sea distinto
+de cero. La columna `data_origin` del enriquecido clasifica la **fila física recibida o añadida**.
+
+#### Pregunta frecuente: «¿cuáles son los dos modos y qué decide auto?»
+
+Hay tres controles con nombres parecidos, pero funciones distintas:
+
+| Control | Opciones | Qué decide |
+|---|---|---|
+| `method.basis_mode` | `ratio`, `additive`, `auto` | Fórmula del ajuste propio; auto selecciona una de las dos fórmulas |
+| `eex_fallback.price_method` | `simple`, `ewma` | Cómo promediar precios EEX cuando faltan componentes; elección explícita, **sin opción auto** |
+| `layers.hist` | `on`, `off`, `auto` | Si se permite sumar la memoria de un modo/grupo; su auto compara errores anteriores |
+
+El selector de fórmula aplica **la primera regla que encaje**, en este orden:
+
+1. `abs(EEX objetivo) < ratio_eex_floor`, por defecto 1 → **additive**.
+2. No queda ninguna ancla ratio válida, pero sí alguna aditiva → **additive**.
+3. No hay anclas de ninguno de los dos modos y solo existe historia aditiva vigente y
+   permitida por hist → **additive**.
+4. En cualquier otro caso → **ratio**.
+
+Con objetivo de magnitud al menos 1 y una única ancla admisible, Own 110 / EEX 100 permite
+ratio; Own −110 / EEX −100 también puede permitirlo: ambos negativos dan factor positivo.
+Own 3 / EEX 0 no permite ratio, pero su diferencia aditiva puede ser válida. Un propio cero
+o signos opuestos tampoco permiten ancla ratio. Si quedan **otras** anclas ratio válidas,
+rechazar una no basta para pasar a additive; la primera regla sobre el objetivo sigue mandando.
+
+Auto evalúa disponibilidad y guardas, **no el error desconocido del hueco ni cuál precio
+parece más convincente**. Forzar ratio mantiene sus filtros y no cambia automáticamente a
+additive cuando una ancla falla. El filtro común puede rechazar una observación para ambos
+modos. La sección 3, paso 3b, desarrolla límites, flags y casos de selección; la sección 16
+explica simple/EWMA, y la sección 7 explica hist-auto.
+
+#### Caso 1. Hay un original válido: se conserva
+
+**Qué significa y cuándo entra.** La fila contiene un VWAP numérico y finito. Supongamos
+M+1 propio **110**, aunque EEX para ese periodo sea **100**. El enriquecido conserva 110 en
+`vwap` y `curve_price`: no lo reduce a 100 ni a una media. Cero y negativos finitos siguen
+siendo originales. Poco volumen o rechazo como ancla no autoriza a sustituirlos.
+
+**Pasos y salida.** Resuelve fecha/identidad/entrega; reconoce el precio propio; conserva la
+observación. En este ejemplo de una sola observación: `data_origin=original`,
+`curve_source=own`, `estimation_method=none`, `curve_price=110`. La curva interna puede
+agregar duplicados/alias; el enriquecido conserva cada fila individual con su propio valor.
+
+**Límite y siguiente paso.** Original no significa validado como precio de mercado. Si la
+celda es inválida, sigue intacta pero ya no aporta precio utilizable: se intenta estimación
+para `curve_price`. Si no existe la fila, se trata como hueco. Una entrega de cero horas
+no se estima en la curva, aunque su original físico siga conservado.
+
+#### Caso 2. La fila falta, pero el mismo periodo propio existe con otra etiqueta
+
+**Qué significa y qué necesita.** Se reutiliza una observación propia de la misma fecha,
+producto, región y unidad cuyo intervalo de entrega coincide exactamente. No se necesita
+una semejanza estadística entre contratos ni se copia el precio de otra fecha.
+
+**Ejemplo.** Para referencia **29-09-2026**, perfil Base y convención diaria calendar,
+`D+1` entrega el 30-09-2026. `BOM` también entrega desde el 30-09 hasta el 01-10 exclusivo.
+Hay una fila original D+1 a **80** y no hay fila BOM.
+
+1. El motor resuelve ambas etiquetas al mismo intervalo.
+2. Encuentra el precio propio 80 del periodo.
+3. Añade BOM a 80 si BOM es objetivo; no calcula ratio, historia ni EWMA para esa copia.
+
+**Salida.** D+1 permanece `original / own / none`. La fila BOM añadida lleva
+`data_origin=estimated`, `curve_source=own`, `estimation_method=own_equivalent_period`
+y `curve_price=80`. En la curva del motor el periodo se considera propio; en el enriquecido
+la nueva fila es estimated porque **esa fila física no contenía un original**, no porque el
+80 sea una predicción estadística. Una fila BOM original inválida puede recibir el mismo
+tratamiento en `curve_price` manteniendo intacta su celda `vwap`.
+
+**Límite y siguiente paso.** Solo vale equivalencia real de entrega y horas. No reutiliza
+automáticamente un Weekend como BOW Peak sin horas. Sin periodo propio equivalente, pasa a EEX.
+
+#### Caso 3. Hay ajuste local, pero no historia permitida ni cross
+
+**Qué significa y qué necesita.** Hoy existen otros contratos propios comparables con EEX.
+Sus diferencias admitidas permiten mover el objetivo, aunque no se haya operado ese objetivo.
+Supongamos EEX objetivo **100**, ajuste local ponderado `b_local=10`, evidencia `W=1.5`
+y `shrink_k=1`. Así `w=1.5/(1.5+1)=0.6`. Esos pesos son supuestos del ejemplo.
+
+1. Las anclas de otros periodos producen una diferencia local de +10 unidades; por ejemplo,
+   un propio 210 frente a su EEX 200 aporta +10.
+2. Sin historia/cross permitido, el respaldo del **ajuste** es cero.
+3. `basis=0.6×10+0.4×0=6`; precio **100+6=106**.
+
+**Salida.** `estimated / eex+local / additive_local`; `curve_basis_local=10`,
+`curve_basis_hist` vacío, `curve_local_weight=0.6`, `curve_basis=6`.
+
+**Límite y siguiente paso.** No transfiere +10 íntegro: modera evidencia local. No utiliza
+EEX suavizado como el 40 % restante; ese porcentaje se aplica a ajuste cero. Si las anclas
+no existen, son rechazadas o local está apagado, prueba historia/cross permitidos; sin ningún
+componente intenta suavizado. Si falta EEX objetivo, ni siquiera +10 permite valorar por esta ruta.
+
+#### Caso 4. Hay ajuste local e historia permitida
+
+Mantén EEX **100**, local **+10** y `w=0.6`; ahora existe historia aditiva vigente y
+permitida de **+4**, aprendida antes de la fecha. Cross está apagado.
+
+1. La señal de hoy aporta `0.6×10=6`.
+2. La memoria anterior aporta `0.4×4=1.6`.
+3. Ajuste total **7.6**; precio **107.6**.
+
+**Salida.** `estimated / eex+local / additive_local_history`; local 10, historia 4, peso 0.6,
+basis 7.6. La fuente sigue siendo local porque domina su peso, pero el método revela ambas partes.
+
+**Qué no significa.** No suma íntegramente 10+4 ni promedia precios propios de contratos
+distintos sin EEX. La historia es una diferencia comparable de esa identidad/modo, no el precio
+de ayer. Si caduca o hist-auto la rechaza, vuelve al caso local con respaldo cero: 106 bajo
+estos mismos supuestos. Si desaparece local pero la historia sigue válida, pasa al caso siguiente.
+
+#### Caso 5. Hoy no hay ajuste local, pero sí historia permitida
+
+**Qué necesita.** EEX objetivo **100**, memoria aditiva anterior **+4** vigente y admitida por
+`hist=on` o por hist-auto; cross apagado. No necesita una operación propia hoy.
+
+Con `w=0`, `basis=4`, precio **104**. Salida:
+`estimated / eex+hist / additive_history`; `curve_basis_hist=4`,
+`curve_basis_local` vacío, `curve_local_weight=0`.
+
+La memoria se formó con pares originales Own/EEX de la misma fecha, después de predecir cada
+día anterior. Su EWMA aprende diferencias en días observados; caduca por días naturales.
+**Histórico +4 sin EEX objetivo no produce 4 ni 104**: falta el nivel al que sumarlo. No se
+arrastra el último precio. Sin historia utilizable, intenta cross si está habilitado y tiene
+evidencia; sin componentes, suavizado EEX. Sin EEX, solo queda reconstrucción opcional o missing.
+
+**Cuánto histórico utiliza y cómo se configura.** No guarda «solo los últimos diez días».
+Estos controles de `config.toml` resuelven preguntas distintas:
+
+| Control | Defecto | Qué significa y efecto de cambiarlo |
+|---|---|---|
+| `method.ewma_halflife_days` | `10` | Memoria exponencial: cuenta actualizaciones de días con observaciones válidas. Tras 10 actualizaciones la influencia del estado anterior se reduce a la mitad; tras 20, a un cuarto. Mayor valor conserva más influencia antigua y reacciona más despacio; menor reacciona antes. No es una ventana fija de 10 días |
+| `method.hist_max_age_days` | `60` | Caduca cada media de tipo/grupo/global, por identidad y modo, al superar 60 días naturales desde su último original admisible emparejado con EEX de la misma fecha. Mayor permite usar memoria sin actualizar durante más tiempo; menor la retira antes. No elimina individualmente todas las observaciones de más de 60 días |
+| `run.warmup_days` | `0` | Reconstruye el estado anterior al intervalo calculado reproduciendo toda la historia original suministrada. Solo los pares admisibles con EEX del mismo día actualizan estas medias. Un N positivo limita el arranque a N días naturales previos; entre valores positivos, mayor incorpora más contexto y menor lo reduce. No descarga datos ausentes y puede producir diferencias entre daily y un refill largo; véase sección 5 |
+
+Ejemplo de aprendizaje: la media anterior es **+4** y las anclas válidas de una nueva fecha
+producen un ajuste diario **+10**. Con vida media 10,
+`alpha=1−2^(−1/10)≈0.066967`; la actualización es
+`(1−alpha)×4+alpha×10 = 4.401802`. Ese nuevo estado sirve para **fechas posteriores**:
+primero se predice el día con la memoria anterior y después se aprende su observación.
+Días sin pares válidos no son actualizaciones, aunque sí cuentan para la caducidad natural.
+La influencia antigua se atenúa mientras la media siga vigente; no hay un corte automático
+al cumplir diez observaciones.
+
+`method.hist_auto_min_obs=10` es otro umbral: masa efectiva de comparaciones previas para
+que hist-auto decida permitir o rechazar historia frente al benchmark EEX. Subirlo retrasa
+la decisión; bajarlo permite decidir antes. No guarda una ventana de diez precios ni cambia
+por sí solo la caducidad; durante ese calentamiento se permite la historia vigente.
+
+Esto es diferente de `eex_fallback.price_window=5` y
+`eex_fallback.ewma_halflife=2`: esos controles promedian **precios EEX** en una ventana
+finita de cinco publicaciones. El histórico propio aprende **diferencias entre Own y EEX, relativas o aditivas,** mediante
+una memoria recursiva. La sección 16 explica ese respaldo separado.
+
+#### Caso 6. Cross aporta información de otras curvas
+
+**Qué es.** `cross=false` por defecto. Al activarlo, relaciones históricas entre sorpresas
+de diferencias Own−EEX —o Own/EEX−1 en ratio— permiten ajustar el respaldo. Requiere EEX y
+memoria interna vigente del objetivo y suficiente evidencia conjunta de un ayudante activo.
+No copia un precio extranjero ni realiza conversión de moneda.
+
+**Ejemplo con las tres partes.** EEX objetivo 100, local +10, historia permitida +4 y w=0.6.
+El ayudante presenta una sorpresa de +4 frente a su propia media de basis; una beta aprendida
+de 0.5 aporta `cross_adj=0.5×4=2`. Son supuestos didácticos de una relación ya admisible.
+
+1. Respaldo corregido: `historia+cross=4+2=6`.
+2. Mezcla: `0.6×10+0.4×6=8.4`.
+3. Precio: **108.4**. Salida `estimated / eex+local / additive_local_history_cross`.
+
+El nombre `source=eex+local` no oculta que cross contribuyó: local pesa 0.6 y el método
+enumera los tres componentes. Si local faltara, historia+cross daría **106** con
+`source=eex+cross` y `additive_history_cross`.
+
+**Interruptores y límites.** Con hist apagado/rechazado, no se suma +4; cross aún puede usar
+memoria interna para calcular sorpresas. Con local 10 y w=0.6, solo respaldo cross +2 daría
+**106.8**, método `additive_local_cross`. Sin cross válido, vuelve a local/hist; sin ningún
+componente, al suavizado. `correlation`, también apagada, cambia pesos entre grupos de tenors;
+es distinta de cross, que incorpora información de otras identidades. Ninguna asegura mejora.
+
+#### Caso 7. No hay ajuste propio utilizable: respaldo EEX suavizado
+
+**Cuándo entra.** Falta precio propio del periodo; existe referencia EEX admitida, pero no
+hay local, historia permitida ni cross utilizable. No copia el settlement del último día.
+Exige las ventanas completas de la sección 16; si falta una publicación necesaria no la
+salta ni usa una ventana parcial.
+
+**Ejemplo de precio.** Para un mes ancla, las cinco últimas publicaciones del mismo mes
+absoluto valen **100,102,104,106,108**. Con `price_method=ewma` y vida media 2 observaciones,
+los pesos, de antiguo a reciente, son aproximadamente **0.088947,0.125790,0.177894,0.251580,0.355788**.
+La suma ponderada da **105.318945**. Con simple daría **104**.
+
+**Ejemplo de meses lejanos.** Por defecto los dos meses ancla son M0 y M1 desde el mes natural
+de referencia; cada uno se promedia individualmente. M2 parte de la media de M1, no de la
+media de M0 y M1 juntas. Si las nueve diferencias simultáneas M2−M1 son 10,11,…,18, su media
+simple es 14: **M2=105.318945+14=119.318945**. Spreads siempre crudos y de la misma publicación;
+no se vuelve a suavizar el último spread. Un Q se promedia como Q, sin forzarlo a igualar meses.
+
+**Salida.** `estimated / eex+smooth / eex_price_ewma` para el mes ancla;
+`eex_month_cascade_ewma` para M2. Basis y peso local vacíos; JSON
+`curve_eex_fallback_trace` contiene toda la evidencia. El precio EEX crudo queda como referencia
+en `curve_eex_settle`; el modo ratio/additive seleccionado no se aplica a esta media.
+
+**Dos EWMA distintas.** La historia propia promedia **diferencias entre Own y EEX, relativas o aditivas,** mediante una
+actualización recursiva y tiene caducidad. Este respaldo promedia **precios EEX del mismo
+contrato** sobre una ventana finita con pesos normalizados. No comparten memoria ni datos de
+aprendizaje. El respaldo no convierte estimaciones anteriores en observaciones.
+
+**Si falta información.** Marca `eex_fallback_unavailable`; con arbitraje apagado queda
+missing. Si activas arbitraje, puede intentar las piezas del caso siguiente. Ventanas completas
+pueden reducir cobertura y el suavizado puede retrasar cambios reales: no garantiza mejor precio.
+
+#### Caso 8. Reconstrucción opcional por contratos: arbitrage
+
+**Estado inicial.** `[layers].arbitrage=false`. Activarlo con `true` autoriza una vía adicional
+para objetivos **todavía pendientes**: EEX no puede valorarlos, o no había ajuste propio
+utilizable y falló la ventana suavizada. No es un candidato que compita con historia ni una
+fase que reemplace cualquier precio por uno supuestamente más coherente.
+
+**Ejemplo sin EEX utilizable.** Hay precios propios de octubre, noviembre y diciembre,
+todos a **120**; falta Q4. Los meses cubren exactamente Q4 y tienen horas positivas.
+Aunque la memoria diga +4, sin EEX Q4 no puede convertirla en precio.
+
+- Con el valor por defecto `false`: Q4 queda **missing**.
+- Con `true`: combina por horas, no por número de meses:
+  `(120×H_oct+120×H_nov+120×H_dic)/(H_oct+H_nov+H_dic)=120`.
+  Salida `estimated / arbitrage / contract_strip`, precio **120**.
+- Si, en cambio, sí existe EEX Q4 **100**, historia permitida **+4** y no hay local/cross,
+  el resultado es **104**, `eex+hist / additive_history`, incluso con arbitrage=true.
+  No compara 104 contra 120 para elegir ni reemplaza el precio ya resuelto.
+
+**Qué piezas y qué límites.** Las piezas pueden ser propias o precios ya estimados ese día.
+Un strip requiere cobertura contigua completa y pondera horas del perfil. Un residuo resta
+una cabeza cubierta a un contrato padre para obtener su cola; no es un solucionador general
+de cualquier sistema de contratos. Una cola pequeña amplifica errores. Un precio construido
+puede heredar errores de piezas estimadas y no hace toda la curva libre de arbitraje.
+
+**Dos construcciones distintas.** `arbitrage=false` **no desactiva** el Pricer que obtiene la
+referencia EEX por exact/strip/residual antes de ajustar, ni el que valora cada publicación
+del respaldo suavizado. Desactiva la reconstrucción final con precios propios/ya rellenados.
+Si está apagada o faltan piezas admisibles, el objetivo sigue missing. Si resolvió tras fallar
+el suavizado, puede conservar `eex_fallback_unavailable`: explica el intento previo.
+
+#### Caso 9. No hay precio justificable: missing
+
+**Ejemplo.** Falta el VWAP del objetivo; no hay EEX utilizable, aunque quede historia aditiva +4;
+arbitraje está apagado. O existe EEX, pero no hay ajustes y solo hay tres publicaciones cuando
+la ventana pide cinco. No hay precio final.
+
+En la curva: `source=missing`, `data_origin=missing`, `estimation_method=unavailable` y
+precio vacío. En el enriquecido: `data_origin=missing`, `estimation_method=none` y
+`curve_price` vacío. Si falló la ventana, aparece su flag; una entrega sin horas lleva
+`zero_delivery_hours`.
+
+Missing **no significa cero**, ni fallo técnico, ni permiso para inventar un settlement.
+El resto de la curva puede calcularse. Un registro missing ya cuenta como procesado para
+catchup; cuando llegue evidencia nueva, usa daily/refill para revisarlo. Si quieres ampliar
+cobertura, revisa datos, mapping, ventanas y —solo si aceptas esa vía— activa arbitraje.
+
+| Caso con supuestos anteriores | Precio | Origen enriquecido | Fuente | Método |
+|---|---:|---|---|---|
+| Original M+1 | 110 | original | own | none |
+| BOM reutilizado desde D+1 equivalente | 80 | estimated | own | own_equivalent_period |
+| Local | 106 | estimated | eex+local | additive_local |
+| Local + historia | 107.6 | estimated | eex+local | additive_local_history |
+| Solo historia | 104 | estimated | eex+hist | additive_history |
+| Local + historia + cross | 108.4 | estimated | eex+local | additive_local_history_cross |
+| Media EWMA del mes ancla | 105.318945 | estimated | eex+smooth | eex_price_ewma |
+| Mes siguiente por cascada | 119.318945 | estimated | eex+smooth | eex_month_cascade_ewma |
+| Q4 desde meses propios, arbitraje activado | 120 | estimated | arbitrage | contract_strip |
+| Información insuficiente / vía apagada | vacío | missing | missing | none |
+
+
+---
+
 ## 1. Qué entra y qué sale
 
 **Entradas**
@@ -261,7 +573,7 @@ Un `product` vacío es un error de entrada.
 
 - `data_origin`: `original` si el VWAP de la fila era numérico y finito, `estimated` si el motor
   aporta el precio que faltaba, o `missing` si no hay precio utilizable.
-- `estimation_method`: método concreto aplicado, por ejemplo `ratio_local_history`, `eex` o
+- `estimation_method`: método concreto aplicado, por ejemplo `ratio_local_history`, `eex_price_ewma` o
   `contract_strip`; `none` en originales válidos y huecos sin estimar.
 - `curve_price`: precio utilizable. Si un VWAP original está vacío o es inválido, su celda original
   sigue intacta y la estimación, si existe, aparece aquí.
@@ -347,7 +659,7 @@ El precio parte de EEX y se corrige con tus observaciones. Hay **tres modos conf
 | `[method].basis_mode` | Qué hace |
 |---|---|
 | `auto` (por defecto) | Para cada hueco decide entre ratio y additive según su EEX, las anclas admisibles y la memoria disponible; el árbol exacto está en el paso 3b |
-| `ratio` | Siempre usa un ajuste relativo: `basis = Own/EEX − 1`, `precio = EEX × (1 + basis)` |
+| `ratio` | Con ajuste disponible, usa un ajuste relativo: `basis = Own/EEX − 1`, `precio = EEX × (1 + basis)` |
 | `additive` | Siempre usa una diferencia en unidades de precio: `basis = Own − EEX`, `precio = EEX + basis` |
 
 `auto` no es una tercera fórmula: selecciona una de las otras dos y deja registrado cuál.
@@ -500,7 +812,7 @@ siempre se conserva en el enriquecido. Otra decisión es si sirve para calcular 
 | Factor del ancla | `Own/EEX > 0` | Own = 0 con EEX distinto de 0, o signos opuestos: se excluye |
 | Desviación del factor | `abs(Own/EEX − 1) <= max_ratio_deviation`, por defecto 1 | Factores demasiado alejados de 1 se excluyen |
 | Ambos precios negativos | Se aplican las mismas reglas | Own = −10, EEX = −12: factor 0.833333, admisible si pasa los demás filtros |
-| Precio EEX del objetivo en `ratio` forzado | El floor no cambia ni recorta ese precio | Objetivo EEX = 0: `0 × (1 + basis) = 0`; en `auto` ese objetivo selecciona additive |
+| Precio EEX del objetivo en `ratio` forzado | El floor no cambia ni recorta ese precio | Con ajuste ratio utilizable: EEX = 0 da `0 × (1 + basis) = 0`; sin componentes aplica sección 16. En `auto` selecciona additive |
 
 Se construyen dos listas de anclas. Ambas pasan los filtros comunes de volumen y desviación
 configurada; additive admite después los pares Own/EEX finitos, mientras ratio exige además
@@ -556,13 +868,13 @@ detector de outliers ni una selección automática del modelo local con menor er
 
 La rama `history_only` consulta las memorias vigentes **y permitidas por `[layers].hist`**:
 con `hist = off` ninguna está permitida; con `hist = auto` se consulta la puntuación propia de
-cada modo. Si no hay anclas, EEX no es pequeño e hist está apagado, se llega a ratio y EEX sin
-corregir aunque quede memoria aditiva interna. Las capas local/cross también conservan sus
+cada modo. Si no hay anclas, EEX no es pequeño e hist está apagado, se selecciona ratio;
+sin cross utilizable se intenta el respaldo EEX suavizado aunque quede memoria aditiva interna. Las capas local/cross también conservan sus
 interruptores: seleccionar un modo no enciende una capa apagada. Cross puede utilizar su
 memoria interna para una sorpresa aunque la capa hist no añada su media, como indica la sección 10.
 
 Los originales se conservan sin estimarlos y no reciben flags de selección automática.
-Sin precio EEX, se mantiene la vía de construcción por contratos (`arbitrage`) o `missing`;
+Sin precio EEX, queda `missing` salvo que actives la construcción por contratos (`arbitrage`);
 auto no crea una curva EEX que falte. Con cero horas de entrega se mantiene `missing` en el motor.
 
 **Ejemplos auditables.** En las tres filas con ancla local se supone que el peso total del
@@ -575,7 +887,7 @@ Así `w = 0.5`. En una ejecución real W se calcula; no está fijado a 1.
 | Ancla Own = 102, EEX = 100; objetivo EEX = 0 | additive por `auto_additive_low_eex` | `b_local = 2`; `b = 1`; precio `0 + 1 = 1` |
 | Ancla Own = 2, EEX = 0; objetivo EEX = 1 | additive por `auto_additive_no_ratio_anchors` | `b_local = 2`; `b = 1`; precio `1 + 1 = 2`; sin shrink la diferencia pura daría 3 |
 | Sin anclas hoy, sin historia ratio permitida y con historia additive = 2 permitida/vigente; objetivo EEX = 150 | additive por `auto_additive_history_only` | `w = 0`; `b = 2`; precio `150 + 2 = 152` |
-| Sin anclas ni historia; objetivo EEX = 150 | ratio por la última rama | Sin ajuste, precio `150`; source `eex` |
+| Sin anclas ni historia; objetivo EEX = 150 | ratio por la última rama | Sin cross, respaldo suavizado `eex+smooth`; no puede deducirse su precio solo del 150 actual |
 
 Forzando `ratio`, el objetivo EEX = 0 del segundo ejemplo seguiría valiendo 0; forzando
 `additive`, todos los huecos con EEX usan diferencias, aunque ratio fuera estable. La selección
@@ -712,7 +1024,7 @@ ratio_hist_corregido = ratio_hist + β · sorpresa_hoy_del_otro
 
 ```
 w = W / (W + shrink_k)
-ratio = w · ratio_local + (1 − w) · ratio_hist(_corregido)   (si no hay historia, ratio_hist = 0 → EEX puro)
+ratio = w · ratio_local + (1 − w) · ratio_hist(_corregido)   (sin historia permitida, ratio_hist = 0; con local sigue habiendo ajuste)
 ```
 
 Ejemplo: `w = 6.19 / (6.19 + 1) = 0.861`, luego `ratio = 0.861 × (−0.723 %) + 0.139 × (−0.759 %) = −0.728 %`.
@@ -733,8 +1045,8 @@ la opción del config; pueden ser distintos cuando se configura auto.
 | Hay EEX y anclas hoy; `w ≥ 0.5` o no hay respaldo histórico/cross | P_ajustado | `eex+local` |
 | Hay EEX, poca o ninguna ancla hoy, y otro producto correlacionado sí tiene VWAPs hoy (mejora 2) | P_ajustado | `eex+cross` |
 | Hay EEX y poca o ninguna ancla hoy, pero hay historia | P_ajustado | `eex+hist` |
-| Hay EEX y no hay ajuste local, histórico ni cross disponible | EEX | `eex` |
-| No hay EEX ni se puede construir | Piezas de lo ya rellenado ese día (strip/residual) | `arbitrage` |
+| Hay EEX y no hay ajuste local, histórico ni cross disponible | Respaldo de ventanas completas (sección 16); si falla, arbitraje opcional/missing | `eex+smooth` si se obtiene precio |
+| No hay EEX utilizable o falla la ventana del respaldo, y activas arbitrage | Piezas de lo ya rellenado ese día (strip/residual) | `arbitrage` |
 | Nada de lo anterior | vacío | `missing` |
 
 Los objetivos con cero horas se dejan `missing` en la curva antes de aplicar esta cascada;
@@ -760,14 +1072,14 @@ qué cuadrar exactamente.
 | 1 | Tienes VWAP del contrato | Se conserva en el enriquecido; en la curva es `own` si el contrato tiene horas positivas |
 | 2 | VWAP válido con volumen < `min_volume` | Se conserva como original; con horas positivas es `own` en la curva, pero no es ancla para ajustar otros contratos |
 | 3 | Te falta el contrato pero tienes otros VWAPs hoy | EEX ajustado con anclas admisibles del modo elegido (`eex+local`) |
-| 4 | **Ningún VWAP del producto hoy** | Se elige el modo y `[layers] hist` permite su ajuste histórico (`eex+hist`) o deja EEX tal cual (`eex`); hist-auto compara errores previos por modo/grupo (sección 7) |
+| 4 | **Ningún VWAP del producto hoy** | Se elige el modo y `[layers] hist` permite su ajuste histórico (`eex+hist`) o intenta el respaldo EEX suavizado (sin ventana: arbitraje opcional/missing); hist-auto compara errores previos por modo/grupo (sección 7) |
 | 4b | Ningún VWAP hoy, pero sí en un producto correlacionado (mejora 2 activada) | EEX de hoy × (1 + histórico + β · sorpresa del otro) (`eex+cross`, modo ratio) |
-| 5 | Nunca ha habido VWAPs (arranque) | EEX tal cual (`eex`) |
+| 5 | Nunca ha habido VWAPs (arranque) | Respaldo EEX suavizado `eex+smooth`; ventanas insuficientes llevan a arbitraje opcional/missing |
 | 6 | EEX no tiene el contrato (cascading, Seasons en DE, BOW/BOM) | Se construye con piezas de EEX y luego se aplica 3/4/5 (`eex_method` = strip/residual) |
 | 7 | EEX no ha publicado hoy | Último día de EEX publicado + aviso en el log; confianza ×0.9; no alimenta el histórico |
-| 8 | Hay un `eex_file` asignado, pero el archivo no existe o no tiene cotizaciones para esa fecha | Solo tus VWAPs + arbitraje (aviso en el log) |
+| 8 | Hay un `eex_file` asignado, pero el archivo no existe o no tiene cotizaciones para esa fecha | Tus VWAPs; arbitraje solo si se activa (aviso en el log) |
 | 8b | `eex_file` está vacío, aunque `use = fill` o `helper` | Identidad sin asignar: se indica y se excluye del motor; originales conservados, sin crear su curva |
-| 9 | Días anteriores a que exista EEX (antes del 10-ago-2026) | Solo tus VWAPs + arbitraje; el resto `missing` |
+| 9 | Días anteriores a que exista EEX (antes del 10-ago-2026) | Tus VWAPs; arbitraje solo si se activa; el resto `missing` |
 | 10 | EEX no llega tan lejos (p. ej. Sum+3 sin Q3-29) | Se intenta construir con la información disponible si `arbitrage` está activo; sin cobertura queda `missing` |
 | 11 | BOM el último día de mes, BOW el domingo | El motor no crea ese tenor; si había una fila original, el enriquecido la conserva |
 | 12 | El mismo contrato con dos etiquetas | Una sola cotización/ancla interna; ambas filas originales se conservan en el enriquecido |
@@ -857,7 +1169,7 @@ resumen o `status`.
 
 ## 6. Parámetros (`config.toml`)
 
-Resumen de controles principales. La **sección 14 detalla las 46 claves de config.toml**,
+Resumen de controles principales. La **sección 14 detalla las 51 claves de config.toml**,
 incluidos aliases, zonas horarias, sensibilidad, condiciones de uso y restricciones.
 
 **Qué capas se usan** (`[layers]`). Así se configura la ejecución sin tocar código:
@@ -868,7 +1180,7 @@ incluidos aliases, zonas horarias, sensibilidad, condiciones de uso y restriccio
 | `correlation` | false | Mejora 1: peso entre grupos medido (sección 10) |
 | `cross` | false | Mejora 2: sorpresa de otros productos correlacionados (sección 10) |
 | `hist` | auto | `on` usa el histórico vigente; `off` no lo usa; `auto` lo decide por grupo según errores previos. Controla también el respaldo de la mezcla local |
-| `arbitrage` | true | Sin EEX: construir con lo ya rellenado |
+| `arbitrage` | false | Opt-in: construir pendientes con contratos propios/ya rellenados; no desactiva Pricer de referencias EEX |
 
 **Resto de parámetros:**
 
@@ -912,7 +1224,7 @@ incluidos aliases, zonas horarias, sensibilidad, condiciones de uso y restriccio
   configura `[conventions]`.
 - **`python run.py backtest`**: *leave-one-out*. Oculta cada VWAP tuyo, lo predice con el resto y
   mide el error de cada método, por grupo de tenor:
-  - `eex`: EEX sin corregir.
+  - `eex`: benchmark EEX sin corregir, exclusivamente para comparación de errores; no es una fuente de producción.
   - `local_*`, `hist_*` y `blend_*`: variantes analíticas en `ratio` y `additive`.
   - `local_corr_*` y `blend_corr_*`: mejora 1.
   - `hist_cross_*`: mejora 2, simulando que ese día no tuvieras anclas propias. Se compara con `hist_*`.
@@ -937,7 +1249,11 @@ globales sin emparejar. El detalle y resumen se guardan en `backtest_loo.csv` y
 La comparación con verdad sintética también se separa por unidad, y `detect-conventions`
 presenta sus diferencias por unidad. Mantener identidades separadas no convierte monedas.
 
-### ¿Factor histórico o EEX tal cual en días sin VWAPs? (`[layers] hist`)
+### ¿Permitir historia según su comparación contra el benchmark EEX? (`[layers] hist`)
+
+EEX sin ajustar es aquí un **benchmark de evaluación**, no el respaldo de producción. Si
+hist-auto rechaza la historia y no queda local/cross, se usa la sección 16, o arbitraje opcional/missing.
+Las siguientes cifras antiguas ilustran el criterio, no el rendimiento del nuevo respaldo.
 
 El factor histórico solo ayuda si tu desviación frente a EEX **se repite de un día a otro**.
 
@@ -959,10 +1275,10 @@ no elige entre ratio y additive, que corresponde a `basis_mode` y al árbol del 
 
 Ejemplo con los datos sintéticos (error medio en el backtest):
 
-| Grupo | `hist_ratio` (factor histórico) | `eex` (tal cual) | `auto` elige |
+| Grupo | `hist_ratio` (factor histórico) | `eex` (benchmark crudo) | Implicación ilustrativa para hist-auto |
 |---|---|---|---|
-| Days/Weeks | 0.82 | **0.74** | EEX tal cual |
-| Months | 0.77 | **0.71** | EEX tal cual |
+| Days/Weeks | 0.82 | **0.74** | Rechazar historia; usar otras capas o respaldo suavizado |
+| Months | 0.77 | **0.71** | Rechazar historia; usar otras capas o respaldo suavizado |
 | Quarters | **0.62** | 0.63 | histórico (casi empate) |
 | Seasons/Cals | **0.53** | 0.56 | histórico |
 
@@ -976,13 +1292,13 @@ Con tus datos reales puede salir al revés. Por eso `auto` es el valor por defec
 
 ## 8. Limitaciones actuales
 
-- Antes de que exista EEX (10-ago-2026 en DE) no hay forma de curva: solo VWAPs + arbitraje.
+- Antes de que exista EEX (10-ago-2026 en DE) no hay forma de curva: solo VWAPs; arbitraje únicamente si se activa.
 - La historia de EEX que puede consultar el motor es la que existe en los ficheros locales;
   el relleno no descarga ni recupera publicaciones ausentes.
 - Un fichero diario aislado no permite reconstruir el factor histórico: hace falta la historia
   original de entrada. Los valores rellenados no se usan como nuevas observaciones.
 - Tras `hist_max_age_days` sin observaciones válidas caduca el factor correspondiente; la
-  estimación depende entonces de los respaldos vigentes, de anclas de hoy o de EEX.
+  estimación depende entonces de los respaldos vigentes, de anclas de hoy o del respaldo EEX suavizado; sin cobertura, arbitraje opcional/missing.
 - Las mejoras 1 y 2 necesitan semanas de historia común para activarse (`prior_obs`, `min_obs`).
 - La cobertura EEX local revisada empieza en agosto de 2026; los datos del input de 2025
   necesitan otros ficheros EEX para beneficiarse de esta forma de curva.
@@ -1030,7 +1346,7 @@ Eso lo dice una tabla editable (en Excel, por ejemplo), con una fila por identid
 El mapeo controla el alcance: encontrar una curva EEX no activa automáticamente una fila nueva.
 Una fila con `use = fill/helper` y `eex_file` vacío queda excluida como `mapping_unassigned`.
 Es distinto de tener un archivo asignado que no existe o carece de cotizaciones: en ese caso
-la identidad sí está activada, se avisa de la falta de datos y puede usar originales/arbitraje.
+la identidad sí está activada, se avisa de la falta de datos y puede usar originales y arbitraje si está activado.
 
 La cabecera es `product,region,unit,use,area,profile,eex_file,hours,timezone,comment`.
 El mismo nombre puede aparecer varias veces si cambia región o unidad; repetir la combinación
@@ -1172,7 +1488,7 @@ co-movimientos a propósito: **decide con el backtest de tus datos reales**.
 
 ## 11. Uso diario, recuperación de pendientes y relleno histórico
 
-Los dos usos comparten el mismo config, cuyo input por defecto es `data/vwaps.xlsx`. Para
+Los tres usos comparten el mismo config, cuyo input por defecto es `data/vwaps.xlsx`. Para
 probar por separado un histórico sintético que hayas generado, selecciona ese fichero
 explícitamente; no se incluye en el paquete portable:
 
@@ -1238,7 +1554,7 @@ o `missing`, aunque su precio proceda de un alias de un contrato propio ya obser
 | Campo del enriquecido | Cómo interpretarlo |
 |---|---|
 | `data_origin` | `original`, `estimated` o `missing`, según el precio utilizable de esta fila |
-| `estimation_method` | Combinación aplicada, por ejemplo `ratio_local_history_cross`, `additive_local`, `eex`, `contract_residual` u `own_equivalent_period` si se reutiliza un periodo propio con otra etiqueta |
+| `estimation_method` | Combinación aplicada, por ejemplo `ratio_local_history_cross`, `additive_local`, `eex_price_ewma`, `contract_residual` u `own_equivalent_period` si se reutiliza un periodo propio con otra etiqueta |
 | `curve_reference_date` | Fecha normalizada de la observación; no es la fecha de entrega |
 | `curve_product` | Nombre normalizado del producto para el cruce |
 | `curve_region` | Región normalizada de la identidad; vacío es un valor literal |
@@ -1246,7 +1562,7 @@ o `missing`, aunque su precio proceda de un alias de un contrato propio ya obser
 | `curve_tenor` | Etiqueta relativa de la fila |
 | `curve_row_type` | `original`, `original_invalid` o `added`, según su relación con el input |
 | `curve_price` | Precio utilizable; respeta el VWAP válido de cada original y recoge la estimación si era inválido |
-| `curve_source` | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex`, `arbitrage` o `missing` |
+| `curve_source` | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage` o `missing` |
 | `curve_area` | Área asignada por el mapeo |
 | `curve_profile` | Perfil asignado por el mapeo |
 | `curve_kind` | Tipo de contrato resuelto: Day, Month, Quarter, etc. |
@@ -1255,13 +1571,14 @@ o `missing`, aunque su precio proceda de un alias de un contrato propio ya obser
 | `curve_delivery_end` | Fin de entrega, excluido |
 | `curve_hours` | Horas del contrato objetivo bajo su perfil y zona horaria |
 | `curve_confidence` | Puntuación heurística descrita en la sección 4 |
-| `curve_basis_mode` | Modo aplicado a la fila: `ratio` o `additive`; en un original no significa que se haya ajustado su VWAP |
+| `curve_basis_mode` | Selección `ratio`/`additive`; en originales y `eex+smooth` no indica una fórmula de basis aplicada |
 | `curve_configured_basis_mode` | Opción solicitada en config: `auto`, `ratio` o `additive` |
 | `curve_own_vwap` | Observación propia; en una fila original válida se refleja su valor individual |
 | `curve_own_volume` | Volumen propio de la fila cuando está disponible; no es volumen estimado |
 | `curve_eex_settle` | Precio EEX del periodo objetivo, directo o construido |
-| `curve_eex_method` | `exact`, `strip` o `residual`; en arbitraje describe la construcción con precios ya disponibles, no una cotización EEX |
+| `curve_eex_method` | Método exact/strip/residual de la referencia EEX. Si el respaldo falla y acaba en arbitraje, conserva ese método si había referencia; sin ella, usa el método de arbitraje. La construcción final está en `estimation_method=contract_*` |
 | `curve_eex_asof` | Fecha de la curva EEX seleccionada; permite medir su antigüedad |
+| `curve_eex_fallback_trace` | JSON completo del respaldo suavizado: precios, pesos, publicaciones y cascada mensual; vacío fuera de esa rama |
 | `curve_basis` | Ajuste final aplicado, después del límite configurado si es ratio |
 | `curve_basis_local` | Ajuste calculado con las anclas de hoy |
 | `curve_basis_hist` | Histórico que se ha permitido usar por las capas y su vigencia |
@@ -1269,7 +1586,7 @@ o `missing`, aunque su precio proceda de un alias de un contrato propio ya obser
 | `curve_local_weight` | Peso `w` de la parte local en la mezcla |
 | `curve_anchors` | Hasta tres etiquetas de las anclas más influyentes; no es la lista completa de todas las anclas |
 | `curve_cross_from` | Productos que aportaron corrección cross, con su correlación |
-| `curve_flag` | Avisos del motor: `anchor_excluded`, `ratio_adjustment_limited`, `zero_delivery_hours` y motivos `auto_additive_low_eex`, `auto_additive_no_ratio_anchors`, `auto_additive_history_only` |
+| `curve_flag` | Avisos del motor: `anchor_excluded`, `ratio_adjustment_limited`, `zero_delivery_hours`, `eex_fallback_unavailable` y motivos `auto_additive_low_eex`, `auto_additive_no_ratio_anchors`, `auto_additive_history_only` |
 | `curve_flags` | Avisos del motor y del enriquecido: VWAP inválido, identidad sin mapear/desactivada, `mapping_unassigned` si falta asignar EEX, unidad vacía u otros metadatos ambiguos |
 
 Si una fila original no tiene equivalente en la curva calculada, algunas columnas del motor
@@ -1278,6 +1595,9 @@ quedan vacías. Eso no borra el original ni indica que su valor se haya estimado
 rechaza como ancla para ajustar otros contratos.
 
 ### 12.2. Cómo reconstruir el cálculo
+
+Si `curve_source=eex+smooth`, sigue directamente el JSON descrito en la sección 16 y el
+diccionario OUTPUT; los pasos de basis siguientes corresponden a local/hist/cross.
 
 Para una fila estimada de `M+4`, la revisión se puede hacer en este orden:
 
@@ -1311,7 +1631,7 @@ Para una fila estimada de `M+4`, la revisión se puede hacer en este orden:
    `consistency_history.csv`. Una desviación se informa; el motor no cambia los originales
    ni vuelve a optimizar toda la curva para eliminarla.
 
-Para `source = eex`, el precio es el EEX registrado. Para `arbitrage`, hay que reconstruir
+Para `source = eex+smooth`, reconstruye la media y cada spread de `curve_eex_fallback_trace`; no apliques la fórmula de basis al settlement registrado. Para `arbitrage`, hay que reconstruir
 el strip o residuo con los precios disponibles del día, porque no se aplicó la mezcla de basis.
 Para `missing`, no existe un precio que auditar: revisa qué cobertura o información faltaba.
 
@@ -1428,7 +1748,7 @@ ya procesados o enriquecer todo el input. Consulta la sección 5.
 
 ## 14. Referencia completa de configuración: qué controla cada decisión
 
-Este capítulo documenta las **46 claves del `config.toml` entregado**. Los valores por defecto se refieren a ese archivo, no a una configuración parcialmente omitida. Edita las secciones TOML existentes sin duplicarlas. Cambiar un parámetro modifica el modelo o la selección de datos; aumentarlo no implica que el precio suba ni que la estimación mejore.
+Este capítulo documenta las **51 claves del `config.toml` entregado**. Los valores por defecto se refieren a ese archivo, no a una configuración parcialmente omitida. Edita las secciones TOML existentes sin duplicarlas. Cambiar un parámetro modifica el modelo o la selección de datos; aumentarlo no implica que el precio suba ni que la estimación mejore.
 
 Las tablas separan el efecto del parámetro de las condiciones en las que interviene. Los rangos numéricos son recomendaciones operativas salvo que se indique expresamente que el cargador los valida. Revisa que los valores sean finitos y tengan sentido: el cargador no comprueba todos los límites recomendados.
 
@@ -1447,11 +1767,11 @@ Se admiten rutas absolutas. Si un archivo asignado no puede leerse, se informa e
 
 | Clave | Defecto | Efecto de activar o desactivar | Cuándo interviene / dependencias |
 |---|---|---|---|
-| `layers.local` | `true` | Activada: los VWAPs originales cercanos de hoy ajustan EEX del objetivo. Apagada: quita ese componente y aumenta la dependencia de historia/cross permitidos o EEX puro. | Objetivos estimados con EEX. Distancia, volumen, tipo y `shrink_k` determinan su influencia. Los originales permanecen intactos. |
+| `layers.local` | `true` | Activada: los VWAPs originales cercanos de hoy ajustan EEX del objetivo. Apagada: quita ese componente y aumenta la dependencia de historia/cross permitidos o respaldo EEX suavizado. | Objetivos estimados con EEX. Distancia, volumen, tipo y `shrink_k` determinan su influencia. Los originales permanecen intactos. |
 | `layers.hist` | `"auto"` | `on`: permite historia vigente. `off`: no suma esa media. `auto`: permite historia salvo que suficientes comparaciones anteriores indiquen que EEX puro fue mejor. | Por modo y grupo, con historia no caducada. `hist_auto_min_obs` retrasa la decisión. Apagarla no borra la historia interna ni apaga cross, que tiene su propio interruptor. |
 | `layers.correlation` | `false` | Activada: relaciones medidas entre grupos pueden sustituir parte del peso fijo entre tipos. Apagada: solo pesos fijos de distancia/tipo. | Estimación local entre grupos diferentes. Necesita sorpresas emparejadas; con pocos datos domina el peso previo. No incorpora por sí sola precios de otro producto. |
 | `layers.cross` | `false` | Activada: sorpresas correlacionadas de otras curvas activas pueden ajustar el respaldo histórico. Apagada: cada curva utiliza sus observaciones/historia y EEX. | Requiere EEX e historia interna del objetivo, sorpresas válidas del ayudante, suficientes parejas y correlación. Pueden ayudar curvas `fill/helper` con EEX asignado, no `off` ni sin asignación. |
-| `layers.arbitrage` | `true` | Activada: intenta reconstruir por strip/residuo con contratos conocidos cuando EEX no valora el objetivo. Apagada: esos objetivos sin resolver quedan missing. | Respaldo tras la valoración con EEX. Necesita calendario de horas compatible y contratos suficientes. No reescribe originales ni obliga a eliminar todas las inconsistencias. |
+| `layers.arbitrage` | `false` | Activada: intenta reconstruir por strip/residuo con contratos conocidos cuando EEX no valora el objetivo o falla el respaldo suavizado. Apagada: esos objetivos sin resolver quedan missing. | Opt-in, apagado por defecto; no desactiva la construcción de referencias EEX. Necesita calendario de horas compatible y contratos suficientes. No reescribe originales ni obliga a eliminar todas las inconsistencias. |
 
 Elegir modo auto no activa ninguna capa apagada. Las historias, puntuaciones, covarianzas y coeficientes de ayuda están separados entre ratio y additive. Correlation y cross permanecen apagados por defecto hasta comprobar su utilidad con datos reales.
 
@@ -1495,15 +1815,27 @@ La lista entregada es `D+1, D+2, D+3, WE, WE+1, WE+2, WE+3, BOW, W+1, W+2, W+3, 
 | `method.min_volume` | `0` | Aumentarlo excluye más observaciones con volumen conocido pequeño; reducirlo admite más. Puede reducir ruido, pero también cobertura y evidencia. | Filtro común previo a ambos modos; usa umbral no negativo en unidades del volumen de entrada. Volumen ausente/inválido es desconocido, no automáticamente inferior al umbral. Originales intactos. |
 | `method.tau_log` | `0.5` | Mayor amplía el alcance de las anclas; menor concentra la estimación cerca del objetivo y puede reducir la evidencia local total W. | Distancia exponencial en log tiempo a entrega. El cargador exige >0. Cambia pesos relativos y reducción hacia el respaldo mediante W; no interviene con local apagado. |
 | `method.other_kind_weight` | `0.6` | Mayor da más influencia a otro tipo de contrato; menor favorece anclas del mismo tipo. Cero elimina su componente fijo. | Peso local. Usa valor no negativo; 0..1 es un rango prudente de atenuación. Con correlation activo puede persistir un componente medido entre grupos; el peso del mismo tipo es 1. |
-| `method.shrink_k` | `1.0` | Mayor reduce el peso de hoy `w=W/(W+k)` y favorece el respaldo permitido; menor confía más en las anclas actuales. Sin respaldo, se reduce hacia EEX puro. | Mezcla local/historia; el cargador exige >0. La dirección del precio depende de ambos ajustes: mayor k no significa necesariamente menor precio. |
+| `method.shrink_k` | `1.0` | Mayor reduce el peso de hoy `w=W/(W+k)` y favorece el respaldo permitido; menor confía más en las anclas actuales. Con local y sin previo histórico/cross, reduce ese ajuste hacia cero; sin ningún componente aplica la sección 16. | Mezcla local/historia; el cargador exige >0. La dirección del precio depende de ambos ajustes: mayor k no significa necesariamente menor precio. |
 | `method.ewma_halflife_days` | `10` | Mayor hace más lenta la adaptación de la historia y sus puntuaciones; menor reacciona rápido y olvida antes observaciones antiguas. | Historias ratio/additive y errores históricos separados. El cargador exige >0. Cuenta actualizaciones con observaciones válidas, no días naturales transcurridos; la caducidad se controla aparte. |
 | `method.max_anchor_dev` | `0` | Cero apaga el filtro. Entre positivos, mayor admite más desviación y menor rechaza más. Pasar de 0 a positivo activa filtrado; no lo relaja. | Filtro común: `abs(Own-EEX)/max(abs(EEX),ratio_eex_floor) > límite`. Usa >=0. El ancla rechazada conserva su precio original, pero deja de ayudar en ambos modos. |
 | `method.ratio_eex_floor` | `1.0` | Mayor rechaza más anclas ratio cercanas a cero y selecciona additive en más objetivos pequeños; menor permite divisiones más próximas a cero y más sensibilidad al denominador. | En unidades de precio de la curva; el cargador exige >0. Justo en el umbral es admisible. También entra en el denominador del filtro común. No recorta, sustituye ni cambia el signo de EEX. |
 | `method.max_ratio_deviation` | `1.0` | Mayor admite diferencias proporcionales y ajustes ratio finales mayores; menor endurece ambos límites. | Solo ratio; el cargador exige >0. Limita `abs(Own/EEX-1)` y la base ratio final. Los signos opuestos siguen sin servir para ratio. No limita diferencias additive ni sobrescribe originales. |
-| `method.hist_max_age_days` | `60` | Mayor permite utilizar medias más antiguas; menor las caduca antes y aumenta la dependencia de hoy o de EEX puro. | Límite positivo en días naturales; el cargador exige >0. Una media de tipo/grupo/global caduca tras más de N días desde su última observación propia válida. Puede seguir vigente un respaldo grupo/global cuando caduca un tipo. |
+| `method.hist_max_age_days` | `60` | Mayor permite utilizar medias más antiguas; menor las caduca antes y aumenta la dependencia de hoy o del respaldo EEX suavizado. | Límite positivo en días naturales; el cargador exige >0. Una media de tipo/grupo/global caduca tras más de N días desde su última observación propia válida. Puede seguir vigente un respaldo grupo/global cuando caduca un tipo. |
 | `method.hist_auto_min_obs` | `10` | Mayor retrasa la decisión de aceptar/rechazar historia con evidencia; menor permite decidir antes, con más ruido. Antes del umbral se permite historia disponible. | Solo controla `layers.hist="auto"`; usa masa efectiva no negativa. Las puntuaciones por modo/grupo decaen con `ewma_halflife_days`, por lo que no equivale a un número bruto de filas. |
 
-Auto elige additive si el EEX absoluto del objetivo está bajo el umbral; en otro caso ratio si hay anclas ratio válidas; si no, additive si hay anclas aditivas; si tampoco, additive cuando solo existe historia aditiva vigente y permitida; en el resto, ratio. Un fallback por precio pequeño sin ajuste utilizable puede devolver EEX puro. La historia aprende únicamente de anclas originales con EEX del mismo día, después de predecir; los estimados no entrenan el modelo.
+Auto elige additive si el EEX absoluto del objetivo está bajo el umbral; en otro caso ratio si hay anclas ratio válidas; si no, additive si hay anclas aditivas; si tampoco, additive cuando solo existe historia aditiva vigente y permitida; en el resto, ratio. Un objetivo sin ajuste utilizable intenta el respaldo EEX suavizado; el modo seleccionado no transforma ese respaldo. La historia aprende únicamente de anclas originales con EEX del mismo día, después de predecir; los estimados no entrenan el modelo.
+
+### Respaldo sin ajuste (`[eex_fallback]`)
+
+Se activa solo sin componentes local/hist/cross. La sección 16 explica las fórmulas y las ventanas completas.
+
+| Clave | Defecto | Qué cambia y qué límites tiene |
+|---|---|---|
+| `eex_fallback.price_method` | `"ewma"` | `simple` da el mismo peso a las N observaciones; `ewma` favorece las recientes. Solo esas dos opciones. No cambia la media simple de spreads |
+| `eex_fallback.price_window` | `5` | Entero ≥2. Mayor usa más publicaciones y puede suavizar más, pero exige mayor cobertura; menor responde con menos memoria. No son días naturales |
+| `eex_fallback.ewma_halflife` | `2.0` | Finito >0. Mayor reparte más peso hacia observaciones antiguas; menor concentra en las recientes. Solo cambia precios con método ewma; debe seguir siendo válido con simple |
+| `eex_fallback.spread_window` | `9` | Entero ≥2. Ventana completa de diferencias mensuales simultáneas. Mayor usa más historia y exige más cobertura. Solo interviene en cascadas mensuales |
+| `eex_fallback.anchor_months` | `2` | Entero ≥1 desde M0. Mayor promedia más meses individualmente y retrasa el inicio de la cascada; no es un número de VWAPs propios |
 
 ### Correlación y ayuda entre curvas
 
@@ -1553,7 +1885,8 @@ predice 102 (error 18), candidato B predice 118 (error 2). B es mejor aunque se 
 El programa no busca que tu curva se parezca más a la curva EEX.
 
 En cada observación evaluada, oculta ese punto propio, lo predice con el pipeline configurado
-y compara contra el valor propio que realmente existía. No se esconde toda la curva del día.
+y compara contra el valor propio que realmente existía. No se esconde toda la curva del día. Para reproducir dependencias de arbitraje, calcula
+todos los targets configurados más el punto ocultado y puntúa solo ese punto.
 Necesitas originales y EEX que coincidan en fechas y periodos de entrega; un scraper similar
 sin ese solapamiento no basta. El comando informa o falla si no hay evidencia emparejada
 suficiente: no inventa métricas para las fechas sin datos comparables.
@@ -1586,22 +1919,37 @@ config. Con los valores por defecto se prueban tres modos, conservando los otros
 Cambiar parámetros como caducidad o volumen requiere una comparación explícita adicional;
 tune no explora automáticamente todo el inventario de configuración.
 
-**Cómo decide cuál es mejor:**
+**Cómo decide cuál es mejor: primero cobertura, después error comparable.**
 
-1. Ordena las fechas propias elegibles de curvas fill activas y aparta las últimas N para
-   validación. En las anteriores calibra todas las combinaciones. No utiliza los errores
-   de validación para escoger el ganador.
-2. Todos los candidatos deben evaluarse sobre exactamente las mismas claves propias y
-   referencia EEX. Para cada curva calcula `MAE_modelo / MAE_EEX`, ambos contra el **mismo
-   VWAP propio ocultado**. Después promedia esos cocientes con igual peso por curva.
-3. Gana el menor promedio de calibración. 1 iguala EEX; 0.7 significa un error normalizado
-   medio por curva un 30 % inferior al de EEX, **no** un 30 % menos de MAE global en moneda.
-   Si EEX acierta perfectamente una curva, el cociente se define como 1 si el modelo también
-   acierta y como infinito si falla. En empate gana el primero en el orden de la rejilla.
-4. Solo entonces evalúa al ganador sobre las fechas posteriores reservadas, con parámetros
-   fijos. La memoria sigue avanzando cronológicamente con los originales ya observados,
-   incluso dentro de la validación: cada fecha utiliza solo historia anterior. No se usa
-   información de precios futura.
+1. Ordena las fechas propias elegibles de curvas fill activas y reserva las últimas N para
+   validación. Calibra todas las combinaciones sobre las anteriores. El holdout no elige ganador.
+2. Define un universo idéntico de observaciones con VWAP ocultado y benchmark EEX disponible.
+   Los casos sin benchmark EEX no entran en este objetivo relativo. Para cada candidato cuenta
+   `n_baseline`, `n_available` (predicciones finitas), `n_missing=n_baseline−n_available` y
+   `coverage=n_available/n_baseline`. Las abstenciones por ventanas incompletas son visibles,
+   no se eliminan silenciosamente del denominador.
+3. Solo son elegibles los candidatos con **máxima cobertura de calibración**. Calcula precisión
+   sobre la **intersección de predicciones de todos los candidatos**, incluidos los de menor
+   cobertura: son exactamente los mismos casos para todos. `n_paired` puede ser menor que
+   `n_available`. Exige al menos dos fechas distintas en esa intersección; si no las hay,
+   aborta y pide revisar datos/rejilla en lugar de comparar muestras distintas.
+4. Dentro de la máxima cobertura, gana el menor promedio por curva de `MAE_modelo/MAE_EEX`,
+   ambos contra el **mismo VWAP propio ocultado**. Cada curva pesa igual. Score 1 iguala EEX;
+   0.7 significa un 30 % menos de error normalizado medio por curva, no un 30 % menos de MAE
+   global en moneda. Si EEX es perfecto: cociente 1 si el modelo también, infinito si falla.
+   Empate de cobertura y score: primer candidato de la rejilla.
+5. Evalúa **solo al ganador** en las fechas posteriores, con parámetros fijos. Su memoria
+   avanza causalmente con originales observados de fechas anteriores, incluso dentro del
+   holdout. El score utiliza sus pares disponibles y reporta cobertura respecto a todo el
+   universo EEX. Si no predice ninguno, cobertura 0, `n_paired=0`, errores y score no
+   evaluables (vacíos/NaN en CSV, null en JSON); no se inventa un score ni se oculta el fallo
+   de cobertura. Las ventanas incompletas son abstenciones; un error interno sigue abortando.
+
+Por ejemplo, un candidato que cubre 90 de 100 casos tiene prioridad sobre otro que cubre
+80, aunque este segundo tenga menor error. Entre dos que cubren 90 se compara score en la
+intersección común de toda la rejilla. Por ello hay que leer **cobertura y precisión juntas**,
+y no asumir que la mejor cifra aislada es el candidato elegido. Los cinco parámetros
+`eex_fallback` quedan fijos en la búsqueda, incluidos overrides CLI; no son nuevas dimensiones.
 
 Escribe `output/tuning_calibration.csv`, `tuning_validation.csv` y `tuning_selected.json`.
 Los CSV muestran score, `normalized_skill=1-score`, número de parejas y errores MAE/RMSE/sesgo
@@ -1614,8 +1962,160 @@ una ruta/configuración por sí sola no conserva sus contenidos.
 de negocio la acepta, copia manualmente los valores seleccionados a las secciones existentes.
 Un fallo de cualquier candidato aborta la evaluación; no se publica una selección parcial.
 
-Es el mejor candidato **entre los probados, en calibración**, no una garantía para el futuro.
+Es el mejor candidato **entre los probados, con máxima cobertura de calibración y mejor score común**, no una garantía para el futuro.
 La validación oculta puntos que sí tuvieron precio: puede favorecer periodos líquidos y no
 demuestra el comportamiento cuando falta una curva diaria entera, ni conoce la verdad de los
 huecos reales. No reajustes repetidamente contra el mismo tramo reservado y después lo
 presentes como evidencia independiente. Reserva nuevas fechas para evaluar cambios posteriores.
+
+
+---
+
+## 16. Respaldo EEX suavizado cuando no hay ajuste propio
+
+Este respaldo sustituye la antigua devolución directa del settlement. **Solo interviene
+si no hay componente local, histórico permitido ni cross utilizable** y existe una referencia
+EEX actual admitida por la regla de antigüedad. Los originales y los ajustes aprendidos siguen
+su cálculo habitual. Un ajuste disponible cuyo valor sea exactamente cero sigue siendo un
+ajuste: no se cambia de rama por coincidir numéricamente con EEX.
+
+En lenguaje de negocio: cuando no sabemos cómo desplazar EEX hacia tu nivel, evitamos copiar
+una sola publicación. Estimamos el nivel a partir de varias publicaciones del mismo contrato;
+para meses lejanos, trasladamos desde un mes cercano las diferencias históricas entre meses.
+No usamos operaciones propias ni estimaciones anteriores para entrenar este respaldo.
+
+### Ventanas completas, contratos fijos y medias
+
+Se toman las últimas publicaciones distintas del archivo EEX hasta la fecha de referencia,
+terminando en el último snapshot permitido por `eex.max_stale_days`. Son **observaciones
+publicadas**, no días naturales: repetir un settlement antiguo en varios días sin publicación
+no aumenta la muestra. Nunca se toman publicaciones futuras.
+
+Cada precio se refiere al **mismo periodo absoluto de entrega** en todas las publicaciones.
+Para cada fecha, Pricer puede obtenerlo por contrato exacto, strip o residuo, con las horas
+del perfil. Si falta ese periodo en cualquiera de las últimas N publicaciones globales del
+archivo, la ventana falla: no se salta la fecha para buscar una más antigua, no se arrastra
+un precio y no se utiliza una ventana parcial.
+
+- `simple`: media aritmética con pesos `1/N`.
+- `ewma`, por defecto: media exponencial **finita y normalizada** de N observaciones,
+  `peso_j = 2^(-edad_j/halflife) / suma_pesos`; edad 0 es la última publicación,
+  1 la anterior, etc. No es la EWMA recursiva del basis propio.
+- `ewma_halflife=2` significa que una publicación dos observaciones anterior recibe la mitad
+  del peso sin normalizar de la última. No significa dos días naturales.
+
+### Meses: nivel cercano y diferencias entre meses
+
+Con `anchor_months=2`, los meses ancla son **M0, mes natural de la fecha de referencia, y M1**.
+Cada uno se promedia por separado durante `price_window=5` publicaciones cuando se solicita.
+M2 y siguientes parten del **último mes ancla, M1**, y añaden sucesivamente:
+
+```text
+precio(M2) = media_precio(M1) + media_simple_9(EEX(M2) − EEX(M1))
+precio(M3) = precio(M2)       + media_simple_9(EEX(M3) − EEX(M2))
+...
+```
+
+Cada spread utiliza ambos precios de la **misma publicación**, durante las últimas
+`spread_window=9` publicaciones. Los spreads son diferencias de precios EEX crudos; no se
+sustituye el spread del último día por uno previamente suavizado. Así se evita volver a suavizar un dato ya promediado
+y se mantienen separadas la media del nivel y la media de spreads. La media de spreads es siempre simple, incluso con precios EWMA.
+
+Para calcular M3 se necesita la ventana completa de M1 y las ventanas completas M1→M2 y
+M2→M3. No hace falta la media de M0, porque su cálculo es independiente. Si falla un eslabón,
+no se publica la cascada incompleta. Los meses se cuentan desde la fecha de referencia,
+no desde la fecha de una publicación antigua ni desde el primer tenor de targets.
+Con `anchor_months=1`, la cascada parte de M0; con 3, parte de M2.
+
+Day, Week, Weekend, Quarter, Season, Year, BOM y BOW se promedian **directamente para su propio
+periodo absoluto** durante la ventana de precios. No se sustituyen automáticamente por los
+meses suavizados. Por tanto, el método conserva diferencias mensuales históricas pero no
+fuerza que un trimestre coincida con el promedio de los meses; las inconsistencias se reportan.
+
+### Ejemplo reproducible: 5 publicaciones de precios y 9 de spreads
+
+Fecha de referencia: 30-09-2026; M1=octubre, M2=noviembre, M3=diciembre. Precios didácticos:
+
+| Publicación | Octubre | Noviembre | Diciembre | Nov−Oct | Dic−Nov |
+|---|---:|---:|---:|---:|---:|
+| 18-09 | 92 | 102 | 103 | 10 | 1 |
+| 21-09 | 94 | 105 | 107 | 11 | 2 |
+| 22-09 | 96 | 108 | 111 | 12 | 3 |
+| 23-09 | 98 | 111 | 115 | 13 | 4 |
+| 24-09 | 100 | 114 | 119 | 14 | 5 |
+| 25-09 | 102 | 117 | 123 | 15 | 6 |
+| 28-09 | 104 | 120 | 127 | 16 | 7 |
+| 29-09 | 106 | 123 | 131 | 17 | 8 |
+| 30-09 | 108 | 126 | 135 | 18 | 9 |
+
+Las últimas cinco observaciones de octubre son 100,102,104,106,108. Su media simple es 104.
+Con EWMA de vida media 2, los pesos normalizados, del más antiguo al reciente, son
+0.088947075, 0.125790159, 0.177894149, 0.251580318 y 0.355788298: media **105.318945**.
+El spread medio Nov−Oct de las nueve publicaciones es **14** y Dic−Nov es **5**.
+Resultado EWMA: M1 **105.318945**, M2 **119.318945**, M3 **124.318945**.
+Con simple: M1 **104**, M2 **118**, M3 **123**.
+
+No se publica noviembre=126 solo por ser el último settlement. Si el cálculo suavizado
+coincide con el settlement por casualidad —por ejemplo precios constantes— se conserva
+esa coincidencia: no se añade una perturbación artificial. Ventanas largas pueden retrasar
+cambios de régimen; ventanas cortas pueden seguir más ruido. Mantener los meses absolutos
+evita mezclar etiquetas que rotan, pero no garantiza modelar toda la estacionalidad ni mejorar
+la predicción. Se necesita validación real y medir también cobertura.
+
+### Los cinco controles y sus alternativas de CLI
+
+```toml
+[eex_fallback]
+price_method = "ewma"
+price_window = 5
+ewma_halflife = 2.0
+spread_window = 9
+anchor_months = 2
+```
+
+| Clave | Defecto | Qué cambia y qué límites tiene |
+|---|---|---|
+| `eex_fallback.price_method` | `"ewma"` | `simple` da el mismo peso a las N observaciones; `ewma` favorece las recientes. Solo esas dos opciones. No cambia la media simple de spreads |
+| `eex_fallback.price_window` | `5` | Entero ≥2. Mayor usa más publicaciones y puede suavizar más, pero exige mayor cobertura; menor responde con menos memoria. No son días naturales |
+| `eex_fallback.ewma_halflife` | `2.0` | Finito >0. Mayor reparte más peso hacia observaciones antiguas; menor concentra en las recientes. Solo cambia precios con método ewma; debe seguir siendo válido con simple |
+| `eex_fallback.spread_window` | `9` | Entero ≥2. Ventana completa de diferencias mensuales simultáneas. Mayor usa más historia y exige más cobertura. Solo interviene en cascadas mensuales |
+| `eex_fallback.anchor_months` | `2` | Entero ≥1 desde M0. Mayor promedia más meses individualmente y retrasa el inicio de la cascada; no es un número de VWAPs propios |
+
+Estos controles no afectan a originales ni a precios con ajuste local/histórico/cross.
+Las ventanas de precio y spread son independientes: no se exige que una sea mayor que la otra.
+La antigüedad máxima controla el último snapshot permitido, no convierte las ventanas en
+ventanas de días naturales. Las 51 claves del config incluyen estos cinco controles.
+
+En `daily`, `refill`, `catchup`, `backtest` y `tune` se pueden sustituir para una ejecución:
+
+| Opción | Control sustituido |
+|---|---|
+| `--eex-price-method simple` o `ewma` | `price_method` |
+| `--eex-price-window N` | `price_window` |
+| `--eex-ewma-halflife H` | `ewma_halflife` |
+| `--eex-spread-window N` | `spread_window` |
+| `--eex-anchor-months N` | `anchor_months` |
+
+Por ejemplo, `python run.py daily --eex-price-method simple --eex-price-window 5`.
+Si se omiten, se usa TOML; no se modifica el archivo. En tune estos valores quedan fijos
+para todos los candidatos: no añaden dimensiones a la rejilla de seis controles.
+
+### Resultado, auditoría y actualización de salidas anteriores
+
+La fuente es `eex+smooth`; los métodos son `eex_price_simple`, `eex_price_ewma`,
+`eex_month_cascade_simple` y `eex_month_cascade_ewma`. `eex_settle` conserva la referencia
+EEX sin suavizar para auditoría. `basis` y `local_weight` quedan vacíos: no describen esta
+media. `basis_mode` indica la selección previa ratio/additive, **no una fórmula aplicada
+al respaldo suavizado**. El JSON `eex_fallback_trace` —`curve_eex_fallback_trace` en
+enriquecido— contiene periodos, fechas, precios, pesos y cada spread: permite rehacer el cálculo.
+
+Sin ventana completa se marca `eex_fallback_unavailable`, se intenta arbitraje solo si lo activaste y, sin una construcción válida, queda `missing`.
+Con la configuración entregada, arbitrage=false, queda directamente missing. El flag puede persistir aunque
+el arbitraje consiga precio. No se vuelve al settlement crudo. El settlement sin ajustar
+sigue siendo el benchmark `eex` del backtest y de hist-auto; benchmark y salida de producción
+son conceptos distintos.
+
+Para aplicar este cambio a resultados antiguos, ejecuta `refill --from ... --to ...` o
+`daily --date ...` sobre las fechas elegidas. Catchup solo recupera grupos pendientes:
+una fila existente, incluso `missing` o una estimación de una versión anterior, ya cuenta
+procesada y no se recalcula solo por actualizar el programa.
