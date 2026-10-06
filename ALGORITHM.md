@@ -14,6 +14,16 @@ which cover only some contracts, and **EEX settlements**, which provide much of 
 
 ---
 
+## What to configure and what to leave at its initial value
+
+The 46 entries in `config.toml` are not 46 parameters you must optimize: 19 are paths,
+column names and time zones. For a first run, review paths, identity mappings and target
+tenors, and keep the `auto` calculation mode. The `correlation` and `cross` layers stay
+disabled. Advanced controls are documented so changes are deliberate and auditable,
+not because every setting needs manual tuning. By default, `tune` compares only `auto`,
+`ratio` and `additive`; expanding the grid to its other five controls requires explicit
+options. All other TOML settings remain fixed.
+
 ## 0. Understand the product before reading the formulas
 
 ### 0.1. The problem it solves

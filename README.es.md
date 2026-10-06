@@ -15,6 +15,17 @@ unidad tiene mapeo, anclas, historia y resultados independientes. Los valores or
 conservan; el cruce interno recorta espacios exteriores sin cambiar mayúsculas ni escritura.
 Región/unidad vacías son valores literales, nunca comodines. El producto no puede estar vacío.
 
+## Configuración mínima para empezar
+
+No necesitas ajustar las 46 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
+no son parámetros estadísticos. Para arrancar, revisa `[paths]`, genera y revisa el mapping,
+elige `[targets].tenors` y deja `method.basis_mode = "auto"`. Mantén los demás valores
+iniciales, incluidas `correlation = false` y `cross = false`.
+
+La referencia completa documenta controles avanzados para auditoría y cambios deliberados.
+`tune` admite seis controles del modelo, pero sin opciones adicionales compara solo los tres
+modos y mantiene el resto fijo. No busca automáticamente entre todas las entradas del TOML.
+
 ## Instalación
 
 Requiere Python 3.11 o posterior. Desde la carpeta del proyecto, utiliza una de estas opciones:

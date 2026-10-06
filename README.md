@@ -15,6 +15,17 @@ or unit has separate mapping, anchors, history and results. Input values are pre
 internal matching trims surrounding whitespace without changing case or spelling. Empty
 region/unit values are literal identities, never wildcards. Product names cannot be empty.
 
+## Minimum setup to get started
+
+You do not need to tune all 46 entries. **19 are paths, column names and time zones**, not
+statistical parameters. Start by reviewing `[paths]`, generating and reviewing the mapping,
+choosing `[targets].tenors`, and keeping `method.basis_mode = "auto"`. Retain the other
+initial values, including `correlation = false` and `cross = false`.
+
+The full reference documents advanced controls for auditing and deliberate changes.
+`tune` supports six model controls, but its default comparison tries only the three basis
+modes and holds everything else fixed. It does not search across every TOML entry.
+
 ## Install
 
 Requires Python 3.11 or later. From the project directory, use either:

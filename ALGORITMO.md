@@ -14,6 +14,16 @@ Cómo se genera, cada día, la curva completa de un producto (por ejemplo DE Bas
 
 ---
 
+## Qué necesitas configurar y qué puedes dejar con los valores iniciales
+
+Las 46 entradas de `config.toml` no son 46 parámetros que debas optimizar: 19 son rutas,
+nombres de columnas y zonas horarias. Para un primer uso, basta con revisar las rutas,
+el mapping de identidades, los tenors objetivo y mantener el modo `auto`. Las capas
+`correlation` y `cross` permanecen desactivadas. Los controles avanzados se documentan
+para que una modificación sea consciente y auditable, no para exigir ajustes manuales.
+`tune` compara por defecto solo `auto`, `ratio` y `additive`; ampliar la búsqueda a sus
+otros cinco controles requiere indicarlo expresamente. El resto del TOML permanece fijo.
+
 ## 0. Entender el producto antes de leer las fórmulas
 
 ### 0.1. Qué problema resuelve
