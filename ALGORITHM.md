@@ -342,6 +342,10 @@ reused as a zero-hour Peak BOW. Without an equivalent own period, proceed to EEX
 
 #### Case 3. Local adjustment exists, without permitted history or cross
 
+The [anchor research note](ANCHORS.md) compares family/horizon relevance, weak-anchor route
+changes and controlled counterexamples. It distinguishes current LOCAL from proposed
+eligibility policies; no universal winning anchor or new production policy is established.
+
 **Meaning and requirements.** Other own contracts today can be compared with EEX. Their
 admissible differences can shift the target even when that target was not traded.
 Assume target EEX **100**, weighted local basis `b_local=10`, evidence `W=1.5` and

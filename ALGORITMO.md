@@ -341,6 +341,10 @@ automáticamente un Weekend como BOW Peak sin horas. Sin periodo propio equivale
 
 #### Caso 3. Hay ajuste local, pero no historia permitida ni cross
 
+[La investigación sobre anclas](ANCHORS.es.md) compara relevancia por familia/horizonte,
+cambios de ruta con anclas débiles y contraejemplos controlados. Distingue LOCAL actual de
+las políticas propuestas: no establece un ancla ganadora universal ni una nueva política de producción.
+
 **Qué significa y qué necesita.** Hoy existen otros contratos propios comparables con EEX.
 Sus diferencias admitidas permiten mover el objetivo, aunque no se haya operado ese objetivo.
 Supongamos EEX objetivo **100**, ajuste local ponderado `b_local=10`, evidencia `W=1.5`

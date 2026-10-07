@@ -12,6 +12,10 @@ and columns, adds absent curve rows, and identifies each price's origin and esti
 
 For the nine price-origin cases with worked examples, see section 0.9 of [ALGORITHM.md](ALGORITHM.md).
 
+[Anchor research](ANCHORS.md) explains when Day/Month observations can help or mislead other
+deliveries, with controlled examples and validation limits. Proposed eligibility policies
+are research only; they are not new production configuration options.
+
 The curve identity is **`(product, region, unit)`**. The same product name in another region
 or unit has separate mapping, anchors, history and results. Input values are preserved;
 internal matching trims surrounding whitespace without changing case or spelling. Empty

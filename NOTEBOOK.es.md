@@ -65,6 +65,11 @@ crear ese archivo no selecciona el kernel ni instala librerías. Estas instrucci
 
 ## Elegir el archivo
 
+La celda de rutas está preparada para la prueba local con
+`output/notebook_validation/filled_history.csv`, un **CSV sintético que no se incluye en
+GitHub**. En otro ordenador debes sustituir `OUTPUT_PATH` por el CSV que hayas generado
+o copiado. La propia celda contiene ejemplos comentados para ambas situaciones.
+
 Si hace falta, edita la primera celda de código:
 
 ```python

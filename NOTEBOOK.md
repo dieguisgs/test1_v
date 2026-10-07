@@ -64,6 +64,11 @@ creating that file does not select a kernel or install packages. These steps fol
 
 ## Select the file
 
+The path cell is set up for the local validation run using
+`output/notebook_validation/filled_history.csv`, a **synthetic CSV that is not included in
+GitHub**. On another computer, replace `OUTPUT_PATH` with the output CSV you generated or
+copied. The cell includes commented examples for both locations.
+
 Edit the first code cell if necessary:
 
 ```python

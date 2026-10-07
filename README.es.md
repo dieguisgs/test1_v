@@ -12,6 +12,10 @@ conserva filas y columnas originales, añade puntos ausentes e indica origen y m
 
 Los nueve casos de procedencia del precio, con ejemplos, se explican en la sección 0.9 de [ALGORITMO.md](ALGORITMO.md).
 
+[La investigación sobre anclas](ANCHORS.es.md) explica cuándo Day/Month pueden ayudar o
+perjudicar otros periodos, con ejemplos controlados y límites de validación. Las políticas
+de elegibilidad propuestas son investigación, no opciones nuevas del config de producción.
+
 La identidad de una curva es **`(product, region, unit)`**. Un mismo nombre en otra región o
 unidad tiene mapeo, anclas, historia y resultados independientes. Los valores originales se
 conservan; el cruce interno recorta espacios exteriores sin cambiar mayúsculas ni escritura.
