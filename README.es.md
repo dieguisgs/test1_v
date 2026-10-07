@@ -17,12 +17,14 @@ unidad tiene mapeo, anclas, historia y resultados independientes. Los valores or
 conservan; el cruce interno recorta espacios exteriores sin cambiar mayúsculas ni escritura.
 Región/unidad vacías son valores literales, nunca comodines. El producto no puede estar vacío.
 
+**Etapa posterior opcional:** [shape](SHAPE.es.md) está implementada y apagada por defecto. Audita o ajusta precios finitos existentes. Solo puede mover precios propios con `shape.adjust_originals=true`; conserva las columnas del input.
+
 ## Configuración mínima para empezar
 
-No necesitas ajustar las 51 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
+No necesitas ajustar las 58 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
 no son parámetros estadísticos. Para arrancar, revisa `[paths]`, genera y revisa el mapping,
 elige `[targets].tenors` y deja `method.basis_mode = "auto"`. Mantén los demás valores
-iniciales, incluidas `correlation = false`, `cross = false` y `arbitrage = false`.
+iniciales, incluidas `correlation = false`, `cross = false`, `arbitrage = false` y `shape.mode = "off"`.
 
 La referencia completa documenta controles avanzados para auditoría y cambios deliberados.
 `tune` admite seis controles del modelo, pero sin opciones adicionales compara solo los tres
@@ -117,7 +119,7 @@ En auto se aplica la primera regla que se cumpla:
    `[layers].hist`, usa additive (`auto_additive_history_only`).
 4. En el resto de los casos, usa ratio.
 
-Los VWAPs originales finitos, incluidos cero y negativos, siempre se conservan. Las anclas
+Los VWAPs brutos originales, incluidos cero y negativos, siempre se conservan. El precio final propio también queda fijo salvo permiso explícito de shape para modificar originales. Las anclas
 ratio exigen `abs(EEX) >= ratio_eex_floor`, `Own/EEX > 0` y
 `abs(Own/EEX − 1) <= max_ratio_deviation`; additive admite pares finitos que superen los
 filtros comunes de volumen/desviación. −10/−12 puede ser un ancla ratio válida; 2/0 no.
@@ -253,7 +255,7 @@ anchor_months = 2
 Estos controles no afectan a originales ni a precios con ajuste local/histórico/cross.
 Las ventanas de precio y spread son independientes: no se exige que una sea mayor que la otra.
 La antigüedad máxima controla el último snapshot permitido, no convierte las ventanas en
-ventanas de días naturales. Las 51 claves del config incluyen estos cinco controles.
+ventanas de días naturales. Las 58 claves del config incluyen estos cinco controles.
 
 En `daily`, `refill`, `catchup`, `backtest` y `tune` se pueden sustituir para una ejecución:
 
@@ -374,7 +376,7 @@ a comparar las interpretaciones.
 | Parámetro | Defecto | Efecto de cambiarlo |
 |---|---|---|
 | `basis_mode` | `"auto"` | Utiliza el árbol por objetivo o fuerza `"ratio"` / `"additive"` |
-| `min_volume` | `0` | Un volumen conocido inferior no sirve de ancla; volumen desconocido no equivale a estar por debajo de un umbral conocido; los originales permanecen intactos |
+| `min_volume` | `0` | Un volumen conocido inferior no sirve de ancla; volumen desconocido no equivale a estar por debajo de un umbral conocido; este filtro de anclas no cambia originales |
 | `tau_log` | `0.5` | Un valor positivo mayor permite más influencia de anclas lejanas |
 | `other_kind_weight` | `0.6` | Peso de anclas de otro tipo de contrato, antes del ajuste de correlación entre grupos si está activado |
 | `shrink_k` | `1.0` | Un valor positivo mayor reduce `w = W/(W+k)` y favorece la historia permitida o el ajuste cero si no hay respaldo |
@@ -574,6 +576,10 @@ de convenciones separan unidades, sin promediar errores EUR/MWh y GBP/MWh. Compa
 
 ## Ajustar parámetros con originales reales: `tune`
 
+La [guía de backtest, forma de curva y alternativas locales](BACKTEST.es.md) separa lo que
+se puede ejecutar hoy de las mejoras propuestas, explica las familias de parámetros y
+documenta la investigación de formas introducidas por el relleno.
+
 **La referencia correcta para medir el error es tu VWAP propio ocultado, no EEX.** EEX es
 una entrada y una comparación de referencia. Ejemplo: propio real 120, EEX 100; candidato A
 predice 102 (error 18), candidato B predice 118 (error 2). B es mejor aunque se aleje de EEX.
@@ -663,3 +669,87 @@ huecos reales. No reajustes repetidamente contra el mismo tramo reservado y desp
 presentes como evidencia independiente. Reserva nuevas fechas para evaluar cambios posteriores.
 
 Los settlements EEX ausentes/no numéricos/no finitos se excluyen con aviso conservando los válidos. Un precio calculado no finito hace fallar el cálculo y evita escribir resultados.
+
+<a id="shape-layer"></a>
+
+## Capa opcional de forma: auditar o ajustar después del refill
+
+Implementada y desactivada por defecto (`shape.mode="off"`). Busca conjuntamente cambiar
+poco el refill, regularizar segundas diferencias de `precio - eex_settle` mensual y reducir
+discrepancias entre Quarter/Year y sus meses ponderados por horas. Usa EEX bruto admitido
+actualmente y una publicación común para cada trío mensual consecutivo; no usa la EWMA del
+respaldo como plantilla. Un agregado completo puede aportar coherencia aunque no haya EEX.
+
+Solo participan precios finitos de Month/Quarter/Year completos. Un trimestre necesita sus
+tres meses y un año sus doce; no se inventan precios ausentes. Con shape activa se incluyen
+etiquetas propias de esos tipos fuera de los objetivos cuando corresponda. Los alias se
+deduplican. Por defecto los precios propios son fijos; `adjust_originals=true` permite moverlos
+con límites y mayor peso de fidelidad, conservando las columnas del input. `curve_price` es
+el precio final; un original ajustado pasa a `estimated`, source `own+shape` y método
+`shape_adjusted_original`.
+
+`audit` registra propuestas sin cambiar precios finales; `adjust` aplica una solución
+validada con límites. La coherencia es una penalización suave, no una igualdad obligatoria.
+Observaciones incompatibles o límites estrechos pueden dejar residuos. Si falla el solver se
+conservan los precios previos. Los cambiados tienen confidence vacío; basis y anclas describen
+el resultado previo. No se exige positividad, no se entrena con precios ajustados y no se
+garantiza mejor predicción ni continuidad al cambiar el calendario.
+
+### Configuración completa [shape]
+
+Estas siete entradas elevan a 57 las claves del config. Los valores iniciales no están
+calibrados. [SHAPE.es.md](SHAPE.es.md) detalla fórmulas, ejemplos, diagnóstico e histórico.
+
+| Clave | Inicial | Significado y efecto |
+|---|---|---|
+| `shape.mode` | `"off"` | `off`, `audit` o `adjust`. Mientras está off, los demás controles no afectan a precios. |
+| `shape.adjust_originals` | `false` | Booleano. True permite mover precios propios elegibles de la curva; conserva el input bruto. En audit solo cambian propuestas. |
+| `shape.smoothness_weight` | `1.0` | Finito, ≥0. Mayor favorece segundas diferencias menores del ajuste mensual Own−EEX. Cero elimina la penalización. No actúa donde falta una referencia válida de tres meses. |
+| `shape.coherence_weight` | `10.0` | Finito, ≥0. Mayor favorece concordancia entre agregado y promedio por horas. Cero elimina la penalización. No actúa sobre agregados incompletos. |
+| `shape.coherence_tolerance` | `0.01` | Finito, ≥0. Margen diagnóstico absoluto del residuo agregado, en la unidad de precio. Mayor relaja la comprobación; no cambia precios ni impone una restricción. Sin términos agregados aplicables no hay veredicto global. |
+| `shape.max_abs_adjustment` | `10.0` | Finito, >0. Movimiento absoluto total máximo por nodo. Mayor permite más cambio, no necesariamente mejores precios. Revisa la unidad; no hay conversión de moneda. |
+| `shape.original_weight` | `10.0` | Finito, ≥1. Peso de fidelidad de originales móviles frente a 1 en estimados. Mayor dificulta mover originales. No tiene efecto sobre su movimiento cuando están fijos. |
+
+
+Las siete opciones funcionan en `daily`, `refill`, `catchup`, `backtest` y `tune`:
+`--shape-mode off|audit|adjust`, `--shape-adjust-originals on|off`,
+`--shape-smoothness-weight`, `--shape-coherence-weight`, `--shape-coherence-tolerance`,
+`--shape-max-abs-adjustment` y `--shape-original-weight`. Solo afectan a esa ejecución.
+
+```powershell
+python run.py daily --date 2026-09-30 --shape-mode audit
+python run.py refill --from 2026-09-01 --to 2026-09-30 --shape-mode adjust --shape-adjust-originals off
+python run.py daily --date 2026-09-30 --shape-mode adjust --shape-adjust-originals on --shape-original-weight 20
+```
+
+Shape no necesita una ventana histórica adicional para resolver una fecha; siguen vigentes
+los requisitos propios/EEX del refill. Calibra intensidades con evaluación histórica real.
+`pipeline_configured` del backtest incluye la capa después de ocultar el periodo evaluado;
+tune conserva sus seis controles y mantiene shape fijo en el snapshot de configuración.
+Recalcula grupos existentes con daily/refill tras cambiar ajustes; catchup no vuelve a
+procesar un missing ya presente. [OUTPUT.es.md](OUTPUT.es.md#shape-output) documenta columnas
+y consistencia antes/después/propuesta.
+
+## Notebook interactivo de resultados
+
+[NOTEBOOK.es.md](NOTEBOOK.es.md) explica el notebook portátil para elegir curva/fecha y
+consultar rangos. Lee `filled_history.csv` desde la carpeta de output configurada; no necesita
+el input VWAP original para inspeccionar resultados guardados. Compara precios antes/después
+de shape y EEX, alineando por defecto periodos absolutos de entrega; las etiquetas relativas
+son otra opción y pueden representar contratos diferentes entre fechas.
+
+```powershell
+uv sync --group notebook
+uv run --group notebook jupyter lab notebooks/inspect_curves.ipynb
+```
+
+**La tolerancia de coherencia es diagnóstica, no una restricción obligatoria.**
+`shape.coherence_tolerance=0.01` compara el valor absoluto del residuo
+promedio-mensual-menos-padre con 0.01 en la unidad de precio de la curva. Subirla relaja la
+comprobación y bajarla la endurece. No cambia el optimizador ni el precio aceptado.
+Penalizaciones suaves, originales protegidos y límites de movimiento pueden dejar un resultado
+fuera del margen. Audit señala la propuesta; adjust señala el resultado publicado. El trace
+informa cada agregado y el resultado global, o null si no hay agregado aplicable. El mismo
+valor numérico se interpreta en la unidad de cada curva; no es un porcentaje ni convierte monedas.
+
+Esta capa por horas es específica de los contratos de power admitidos. No debe trasladarse a curvas agrícolas u otros activos sin validar sus entregas; véanse [el alcance y la muestra EEX observada](SHAPE.es.md#por-qué-es-específico-de-power-y-qué-mostró-la-muestra-eex).

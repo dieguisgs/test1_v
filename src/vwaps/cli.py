@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from vwaps.backtest import compare_truth, summarize_loo
-from vwaps.config import Config, load_config, validate_fallback_config
+from vwaps.config import Config, load_config, validate_fallback_config, validate_shape_config
 from vwaps.dates import parse_reference_dates
 from vwaps.enrich import enrich_input
 from vwaps.fill import CurveFiller
@@ -102,6 +102,21 @@ def main(argv: list[str], config_path: Path) -> int:
                            help="complete simple-average monthly spread window, at least 2 dates")
         group.add_argument("--eex-anchor-months", dest="fallback_anchor_months", type=int, default=None,
                            help="directly averaged months from the current calendar month, at least 1")
+        group = parser.add_argument_group("Optional curve shape adjustment (override config for this run)")
+        group.add_argument("--shape-mode", choices=("off", "audit", "adjust"), default=None,
+                           help="disable, propose without applying, or apply shape adjustments")
+        group.add_argument("--shape-adjust-originals", choices=("on", "off"), default=None,
+                           help="allow or forbid changes to final prices derived from original observations")
+        group.add_argument("--shape-smoothness-weight", type=float, default=None,
+                           help="nonnegative penalty on irregular adjustment to raw EEX")
+        group.add_argument("--shape-coherence-weight", type=float, default=None,
+                           help="nonnegative soft aggregation penalty; does not guarantee exact equality")
+        group.add_argument("--shape-max-abs-adjustment", type=float, default=None,
+                           help="positive maximum price change in each curve's price unit")
+        group.add_argument("--shape-original-weight", type=float, default=None,
+                           help="fidelity weight for original prices when adjustment is allowed, at least 1")
+        group.add_argument("--shape-coherence-tolerance", type=float, default=None,
+                           help="nonnegative diagnostic tolerance for aggregate discrepancies in price units")
 
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
@@ -110,9 +125,15 @@ def main(argv: list[str], config_path: Path) -> int:
         overrides = {name: getattr(a, name) for name in (
             "fallback_price_method", "fallback_price_window", "fallback_ewma_halflife",
             "fallback_spread_window", "fallback_anchor_months",
+            "shape_mode", "shape_adjust_originals", "shape_smoothness_weight",
+            "shape_coherence_weight", "shape_max_abs_adjustment", "shape_original_weight",
+            "shape_coherence_tolerance",
         ) if getattr(a, name, None) is not None}
+        if "shape_adjust_originals" in overrides:
+            overrides["shape_adjust_originals"] = overrides["shape_adjust_originals"] == "on"
         cfg = replace(cfg, **overrides)
         validate_fallback_config(cfg)
+        validate_shape_config(cfg)
         return {
             "mapping": cmd_mapping, "daily": cmd_daily, "refill": cmd_refill,
             "catchup": cmd_catchup, "status": cmd_status,
@@ -134,6 +155,12 @@ def _table(df: pd.DataFrame, index: bool = False) -> str:
     with pd.option_context("display.max_rows", 500, "display.width", 250,
                            "display.max_colwidth", 60):
         return df.to_string(index=index)
+
+
+def _source_order(sources) -> list[str]:
+    """Keep known sources first without dropping additional transformation sources."""
+    present = set(sources)
+    return [name for name in SOURCES if name in present] + sorted(present - set(SOURCES))
 
 
 def _books(cfg: Config, maps: list[ProductMap]) -> dict[CurveKey, EexBook | None]:
@@ -276,7 +303,7 @@ def _print_summary(filled: pd.DataFrame) -> None:
     # Summarize by product for large runs; daily details remain in filled_history.csv / status.
     index = IDENTITY_COLUMNS if n_prod > 1 and n_days > 1 else KEYS
     t = filled.pivot_table(index=index, columns="source", values="tenor", aggfunc="count", fill_value=0)
-    t = t.reindex(columns=[s for s in SOURCES if s in t.columns])
+    t = t.reindex(columns=_source_order(t.columns))
     if "missing" in t.columns:
         t["% missing"] = (100 * t["missing"] / t.sum(axis=1)).round(1)
     _out(_table(t, index=True))
@@ -286,14 +313,15 @@ def _print_summary(filled: pd.DataFrame) -> None:
         _out("\nUnfilled tenors (cells): " + ", ".join(f"{k}={v}" for k, v in by.items()))
     n = len(filled)
     _out(f"\n{n} cells | " + " | ".join(
-        f"{s} {100 * (filled['source'] == s).sum() / n:.1f}%" for s in SOURCES
-        if (filled['source'] == s).any()))
+        f"{s} {100 * (filled['source'] == s).sum() / n:.1f}%"
+        for s in _source_order(filled["source"])))
 
 
 def _layers(cfg: Config) -> str:
     on = [n for n, v in [("local", cfg.layer_local), ("correlation", cfg.layer_correlation),
                          ("cross", cfg.layer_cross), ("arbitrage", cfg.layer_arbitrage)] if v]
-    return f"Layers: {', '.join(on)} | hist={cfg.layer_hist} | mode={cfg.basis_mode}"
+    return (f"Layers: {', '.join(on)} | hist={cfg.layer_hist} | mode={cfg.basis_mode} "
+            f"| shape={cfg.shape_mode} | shape_adjust_originals={cfg.shape_adjust_originals}")
 
 
 # --------------------------------------------------------------- commands
@@ -465,7 +493,7 @@ def cmd_status(cfg: Config, a) -> int:
     last = h[h["reference_date"].isin(days[-a.last:])]
     t = last.pivot_table(index="reference_date", columns="source", values="tenor",
                          aggfunc="count", fill_value=0)
-    _out(_table(t.reindex(columns=[s for s in SOURCES if s in t.columns]), index=True))
+    _out(_table(t.reindex(columns=_source_order(t.columns)), index=True))
     d0, d1 = date.fromisoformat(days[0]), date.fromisoformat(days[-1])
     have = set(days)
     gaps = [d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)]

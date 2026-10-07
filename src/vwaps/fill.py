@@ -31,7 +31,7 @@ from vwaps.basis import (
     local_basis, log_ttm,
 )
 from vwaps.comove import EWCov
-from vwaps.config import Config
+from vwaps.config import Config, validate_shape_config
 from vwaps.eex_fallback import EexFallback
 from vwaps.consistency import check_day
 from vwaps.hours import hours_fn
@@ -40,6 +40,7 @@ from vwaps.io_eex import EexBook
 from vwaps.log import get_logger
 from vwaps.mapping import ProductMap
 from vwaps.pricer import Pricer
+from vwaps.shape import apply_shape
 from vwaps.tenors import Key, Period, resolve_tenor
 
 MODES = ("additive", "ratio")
@@ -127,6 +128,7 @@ class RunResult:
 class CurveFiller:
     def __init__(self, cfg: Config, vwaps: pd.DataFrame, maps: list[ProductMap],
                  books: dict[CurveKey | str, EexBook | None]):
+        validate_shape_config(cfg)
         self.cfg = cfg
         self.vwaps = vwaps
         self.maps = [m for m in maps if m.active]
@@ -196,7 +198,17 @@ class CurveFiller:
                     continue
                 try:
                     rows = self._fill(s, day, preps)
-                    cons += check_day(rows, s.hfn)
+                    if cfg.shape_mode == "off":
+                        cons += check_day(rows, s.hfn)
+                    else:
+                        before = [{**r, "price": r["price_before_shape"],
+                                   "source": r["source_before_shape"]} for r in rows]
+                        cons += [{**r, "shape_stage": "before"} for r in check_day(before, s.hfn)]
+                        cons += [{**r, "shape_stage": "after"} for r in check_day(rows, s.hfn)]
+                        if cfg.shape_mode == "audit":
+                            proposed = [{**r, "price": r["shape_proposed_price"]} for r in rows]
+                            cons += [{**r, "shape_stage": "proposed"}
+                                     for r in check_day(proposed, s.hfn)]
                     if loo:
                         loo_rows += self._loo(s, day, preps)
                 except Exception:
@@ -368,7 +380,14 @@ class CurveFiller:
         p = preps[s.key]
         kind_factors = {md: self._kind_factor(s, cfg.layer_correlation, md) for md in MODES}
         rows, pending = [], []
-        for label in dict.fromkeys(labels if labels is not None else cfg.tenors):
+        requested = list(labels if labels is not None else cfg.tenors)
+        if cfg.shape_mode != "off":
+            # Include observed periods as shape context, including their aliases.
+            # In LOO p.own already excludes the entire held-out delivery period.
+            requested.extend(label for q in p.own.values()
+                             if q.period.kind in ("Month", "Quarter", "Year")
+                             for label in q.tenors)
+        for label in dict.fromkeys(requested):
             per = resolve_tenor(label, day, cfg.day_convention, cfg.weekend_offset)
             if per is None:
                 continue
@@ -471,7 +490,7 @@ class CurveFiller:
         for row in rows:
             if row["source"] != "missing" and not math.isfinite(row["price"]):
                 raise ValueError(f"{s.name} {day} {row['tenor']}: computed price must be finite")
-        return rows
+        return apply_shape(rows, cfg)
 
     # ------------------------------------------------ update history
     def _update(self, series: list[Series], day: date, preps: dict) -> None:

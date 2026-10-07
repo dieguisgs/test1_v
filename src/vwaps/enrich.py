@@ -171,12 +171,33 @@ def enrich_input(
         elif m.use != "fill":
             flags.append(f"mapping_{m.use}")
         if original:
+            original_price = _number(record[col["vwap"]])
             record.update(data_origin="original", estimation_method="none",
-                          curve_price=_number(record[col["vwap"]]), curve_source="own")
+                          curve_price=original_price, curve_source="own")
             if "curve_own_vwap" in record:
-                record["curve_own_vwap"] = record["curve_price"]
+                record["curve_own_vwap"] = original_price
             if "curve_own_volume" in record:
                 record["curve_own_volume"] = _number(record.get(col["volume"]))
+            if "price_before_shape" in model:
+                # The engine works with one volume-aggregated price per period.
+                # Apply its common additive change to each physical input row,
+                # preserving duplicates and every original input column.
+                proposed_delta = _number(model.get("shape_proposed_adjustment"))
+                proposed_delta = proposed_delta if math.isfinite(proposed_delta) else 0.0
+                record.update(curve_price_before_shape=original_price,
+                              curve_source_before_shape="own",
+                              curve_estimation_method_before_shape="none",
+                              curve_data_origin_before_shape="original",
+                              curve_shape_proposed_price=original_price + proposed_delta)
+                if (cfg.shape_mode == "adjust" and cfg.shape_adjust_originals
+                        and model.get("shape_original_modified") is True):
+                    delta = _number(model.get("shape_adjustment"))
+                    final_price = original_price + delta
+                    if not math.isfinite(final_price):
+                        raise ValueError("Shape adjustment exceeds the finite range of an original row")
+                    record.update(data_origin="estimated",
+                                  estimation_method="shape_adjusted_original",
+                                  curve_price=final_price, curve_source="own+shape")
         else:
             price = _number(model.get("price"))
             available = not math.isnan(price) and model.get("source") != "missing"

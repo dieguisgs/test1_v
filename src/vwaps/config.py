@@ -53,6 +53,13 @@ class Config:
     fallback_ewma_halflife: float = 2.0
     fallback_spread_window: int = 9
     fallback_anchor_months: int = 2
+    shape_mode: str = "off"
+    shape_adjust_originals: bool = False
+    shape_smoothness_weight: float = 1.0
+    shape_coherence_weight: float = 10.0
+    shape_max_abs_adjustment: float = 10.0
+    shape_original_weight: float = 10.0
+    shape_coherence_tolerance: float = 0.01
 
     def tz(self, area: str) -> str:
         return self.timezones.get(area, self.timezones.get("default", "Europe/Berlin"))
@@ -76,6 +83,26 @@ def validate_fallback_config(cfg: Config) -> None:
         raise ValueError("eex_fallback.ewma_halflife must be a finite positive number")
 
 
+def validate_shape_config(cfg: Config) -> None:
+    """Validate optional shape controls without coercing strings or booleans."""
+    if cfg.shape_mode not in ("off", "audit", "adjust"):
+        raise ValueError("shape.mode must be off, audit or adjust")
+    if not isinstance(cfg.shape_adjust_originals, bool):
+        raise ValueError("shape.adjust_originals must be a boolean")
+    for name in ("smoothness_weight", "coherence_weight", "max_abs_adjustment", "original_weight",
+                 "coherence_tolerance"):
+        value = getattr(cfg, f"shape_{name}")
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            raise ValueError(f"shape.{name} must be a finite number")
+        if name in ("smoothness_weight", "coherence_weight", "coherence_tolerance") and value < 0:
+            raise ValueError(f"shape.{name} must be >= 0")
+        if name == "max_abs_adjustment" and value <= 0:
+            raise ValueError("shape.max_abs_adjustment must be > 0")
+        if name == "original_weight" and value < 1:
+            raise ValueError("shape.original_weight must be >= 1")
+
+
 def load_config(path: str | Path) -> Config:
     path = Path(path).resolve()
     with open(path, "rb") as fh:
@@ -88,6 +115,7 @@ def load_config(path: str | Path) -> Config:
     corr = raw.get("correlation", {})
     cross = raw.get("cross", {})
     fallback = raw.get("eex_fallback", {})
+    shape = raw.get("shape", {})
     cfg = Config(
         base_dir=path.parent,
         vwap_input=paths.get("vwap_input", "data/vwaps.csv"),
@@ -126,6 +154,13 @@ def load_config(path: str | Path) -> Config:
         fallback_ewma_halflife=fallback.get("ewma_halflife", 2.0),
         fallback_spread_window=fallback.get("spread_window", 9),
         fallback_anchor_months=fallback.get("anchor_months", 2),
+        shape_mode=shape.get("mode", "off"),
+        shape_adjust_originals=shape.get("adjust_originals", False),
+        shape_smoothness_weight=shape.get("smoothness_weight", 1.0),
+        shape_coherence_weight=shape.get("coherence_weight", 10.0),
+        shape_max_abs_adjustment=shape.get("max_abs_adjustment", 10.0),
+        shape_original_weight=shape.get("original_weight", 10.0),
+        shape_coherence_tolerance=shape.get("coherence_tolerance", 0.01),
     )
     cfg.mapping_file = cfg.resolve(paths.get("mapping", "mappings/products.csv"))
     cfg.eex_curves_dir = cfg.resolve(paths.get("eex_curves_dir", "../eex_scraper/output/curves/POWER"))
@@ -143,4 +178,5 @@ def load_config(path: str | Path) -> Config:
     if cfg.warmup_days < 0:
         raise ValueError("warmup_days must be >= 0; 0 replays all original history")
     validate_fallback_config(cfg)
+    validate_shape_config(cfg)
     return cfg

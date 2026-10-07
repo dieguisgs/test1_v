@@ -17,12 +17,14 @@ or unit has separate mapping, anchors, history and results. Input values are pre
 internal matching trims surrounding whitespace without changing case or spelling. Empty
 region/unit values are literal identities, never wildcards. Product names cannot be empty.
 
+**Optional post-processing:** [shape](SHAPE.md) is implemented and off by default. It can audit or adjust existing finite curve prices. Original curve prices can move only with `shape.adjust_originals=true`; raw input columns remain intact.
+
 ## Minimum setup to get started
 
-You do not need to tune all 51 entries. **19 are paths, column names and time zones**, not
+You do not need to tune all 58 entries. **19 are paths, column names and time zones**, not
 statistical parameters. Start by reviewing `[paths]`, generating and reviewing the mapping,
 choosing `[targets].tenors`, and keeping `method.basis_mode = "auto"`. Retain the other
-initial values, including `correlation = false`, `cross = false` and `arbitrage = false`.
+initial values, including `correlation = false`, `cross = false`, `arbitrage = false` and `shape.mode = "off"`.
 
 The full reference documents advanced controls for auditing and deliberate changes.
 `tune` supports six model controls, but its default comparison tries only the three basis
@@ -117,7 +119,7 @@ In auto, the first matching rule wins:
    `[layers].hist`, use additive (`auto_additive_history_only`).
 4. Otherwise use ratio.
 
-Original finite VWAPs, including zero and negative values, are always preserved. Ratio anchors
+Raw original VWAPs, including zero and negative values, are always preserved. Final own curve prices also remain fixed unless shape adjustment explicitly permits moving originals. Ratio anchors
 require `abs(EEX) >= ratio_eex_floor`, `Own/EEX > 0` and
 `abs(Own/EEX − 1) <= max_ratio_deviation`; additive accepts finite pairs after the common
 volume/deviation filters. Negative pairs such as −10/−12 can be valid ratio anchors; 2/0 cannot.
@@ -252,7 +254,7 @@ anchor_months = 2
 These controls do not change originals or prices with local/historical/cross adjustments.
 Price and spread windows are independent: neither must be larger than the other.
 Maximum staleness governs the latest accepted snapshot; it does not turn the windows into
-calendar-day windows. The 51 configuration keys include these five controls.
+calendar-day windows. The 58 configuration keys include these five controls.
 
 Override them for one `daily`, `refill`, `catchup`, `backtest` or `tune` execution:
 
@@ -372,7 +374,7 @@ Adding a target does not guarantee coverage. Use `detect-conventions` to compare
 | Parameter | Default | Effect of changing it |
 |---|---|---|
 | `basis_mode` | `"auto"` | Use the per-target tree above, or force `"ratio"` / `"additive"` |
-| `min_volume` | `0` | Known volume below this threshold cannot anchor adjustments; missing volume is not below a known threshold; originals remain intact |
+| `min_volume` | `0` | Known volume below this threshold cannot anchor adjustments; missing volume is not below a known threshold; this anchor filter does not change original values |
 | `tau_log` | `0.5` | Larger positive values let more distant anchors influence a target |
 | `other_kind_weight` | `0.6` | Greater weight for anchors of another contract kind, before any configured between-group correlation adjustment |
 | `shrink_k` | `1.0` | Larger positive values lower local weight `w = W/(W+k)`, favouring allowed history or zero adjustment if no prior exists |
@@ -569,6 +571,10 @@ with EEX on the same observations using `n_paired` and `mae_improvement`.
 
 ## Select parameters against real originals: `tune`
 
+The [backtest, curve-shape and local-alternatives guide](BACKTEST.md) separates implemented
+evaluation from proposed improvements, explains parameter families and records the investigation
+of shapes introduced by filling.
+
 **Prediction errors are measured against your hidden own VWAP, not against EEX.** EEX is an
 input and comparison baseline. Example: actual own price 120, EEX 100; candidate A predicts
 102 (error 18), candidate B predicts 118 (error 2). B is better even though it moves farther
@@ -656,3 +662,87 @@ actual unobserved gaps. Do not repeatedly tune against the same reserved period 
 present it as independent evidence. Reserve fresh dates for later changes.
 
 Missing, nonnumeric or nonfinite EEX settlements are excluded with a warning while valid quotes remain. A nonfinite calculated price fails the run and prevents result writes.
+
+<a id="shape-layer"></a>
+
+## Optional shape layer: audit or adjust after refill
+
+Implemented and disabled by default (`shape.mode="off"`). It jointly limits changes to the
+refill, regularizes second differences of monthly `price - eex_settle`, and reduces
+hours-weighted Quarter/Year-versus-month discrepancies. It uses current accepted raw EEX
+references with a shared publication date for each consecutive three-month smoothness term;
+it does not use fallback EWMA as a template. A complete aggregate can contribute without EEX.
+
+Only finite full Month/Quarter/Year prices participate. Quarters need all three months and
+years all twelve; no missing price is invented. Original labels of these kinds can be included
+outside the configured targets while shape is active. Aliases are deduplicated. Defaults keep
+own prices fixed. `adjust_originals=true` permits bounded movement with greater fidelity
+weight, but original input columns remain intact. `curve_price` is the final usable price;
+an adjusted original becomes `estimated`, source `own+shape`, method `shape_adjusted_original`.
+
+`audit` records proposals without changing final prices; `adjust` applies a validated bounded
+solution. Aggregate penalties are soft, not exact equalities. Conflicting observations or
+bounds can leave residuals. Solver failure retains prior prices. Changed prices have empty
+confidence; previous basis/anchor diagnostics explain the pre-shape result. There is no
+positivity rule, no automatic history training from adjusted prices and no guarantee of
+better prediction or continuity at calendar rollover.
+
+### Complete [shape] configuration
+
+These seven entries bring the supplied configuration to 58 keys. Defaults are uncalibrated
+starter values. Detailed formulas, examples, solver diagnostics and history needs are in
+[SHAPE.md](SHAPE.md).
+
+| Key | Default | Meaning and effect |
+|---|---|---|
+| `shape.mode` | `"off"` | `off`, `audit` or `adjust`. Other controls have no price effect while off. |
+| `shape.adjust_originals` | `false` | Boolean. True permits eligible own curve prices to move; raw input columns still remain untouched. In audit only proposals move. |
+| `shape.smoothness_weight` | `1.0` | Finite, ≥0. Higher favors smaller second differences in monthly Own-minus-EEX adjustment. Zero removes this penalty. No effect where a valid three-month reference is unavailable. |
+| `shape.coherence_weight` | `10.0` | Finite, ≥0. Higher favors closer hours-weighted aggregate agreement. Zero removes this penalty. No effect on incomplete aggregates. |
+| `shape.coherence_tolerance` | `0.01` | Finite, ≥0. Diagnostic absolute aggregate-residual margin in the curve's price unit. Larger relaxes the reported test; it does not change prices or impose a hard constraint. No overall verdict without applicable aggregate terms. |
+| `shape.max_abs_adjustment` | `10.0` | Finite, >0. Maximum total absolute price movement per node. Larger allows more changes, not necessarily better estimates. Check the curve's unit; no currency conversion occurs. |
+| `shape.original_weight` | `10.0` | Finite, ≥1. Fidelity weight for movable originals versus 1 for estimates. Higher resists moving originals. Has no movement effect while originals are fixed. |
+
+
+All seven flags work on `daily`, `refill`, `catchup`, `backtest` and `tune`:
+`--shape-mode off|audit|adjust`, `--shape-adjust-originals on|off`,
+`--shape-smoothness-weight`, `--shape-coherence-weight`, `--shape-coherence-tolerance`,
+`--shape-max-abs-adjustment`, `--shape-original-weight`. They override this run only.
+
+```powershell
+python run.py daily --date 2026-09-30 --shape-mode audit
+python run.py refill --from 2026-09-01 --to 2026-09-30 --shape-mode adjust --shape-adjust-originals off
+python run.py daily --date 2026-09-30 --shape-mode adjust --shape-adjust-originals on --shape-original-weight 20
+```
+
+Shape needs no extra historical window for a same-date solve; refill's own/EEX requirements
+still apply. Calibrate its strengths on real historical evaluation. Backtest
+`pipeline_configured` includes the layer after hiding the test period; tune still varies
+only its existing six controls and keeps shape fixed in the saved configuration snapshot.
+Recalculate existing groups with daily/refill after changing settings; catchup does not
+reprocess an already present missing row. See [OUTPUT.md](OUTPUT.md#shape-output) for all
+active columns and before/after/proposed consistency diagnostics.
+
+## Interactive output notebook
+
+[NOTEBOOK.md](NOTEBOOK.md) explains the portable notebook for selecting a curve/date and
+viewing a date range. It reads `filled_history.csv` from the configured output directory;
+the original VWAP input file is not required to inspect existing output. Charts compare
+pre-shape/final prices and EEX, and align absolute delivery periods by default; relative
+rolling labels are a separate choice and can refer to different contracts across dates.
+
+```powershell
+uv sync --group notebook
+uv run --group notebook jupyter lab notebooks/inspect_curves.ipynb
+```
+
+**Coherence tolerance is a diagnostic, not a hard constraint.** `shape.coherence_tolerance=0.01`
+compares the absolute monthly-average-minus-parent residual with 0.01 in the curve's price
+unit. Increasing it relaxes the reported test; decreasing it tightens it. It changes neither
+the optimizer nor the accepted price. Soft penalties, protected originals and movement
+bounds can leave a result outside tolerance. Audit flags the proposal; adjust flags the
+published result. The trace reports each aggregate test and the overall result, or null
+when there is no applicable aggregate. The same numeric setting is interpreted in each
+curve's own unit; it is not a percentage or a currency conversion.
+
+This hours-based layer is specific to the supported power contracts. It must not be transferred to agricultural or other asset curves without validating their delivery definitions; see [scope and the observed EEX sample](SHAPE.md#why-this-is-power-specific-and-what-the-eex-sample-showed).

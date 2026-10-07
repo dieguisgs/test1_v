@@ -18,7 +18,7 @@ which cover only some contracts, and **EEX settlements**, which provide much of 
 
 ## What to configure and what to leave at its initial value
 
-The 51 entries in `config.toml` are not 51 parameters you must optimize: 19 are paths,
+The 58 entries in `config.toml` are not 58 parameters you must optimize: 19 are paths,
 column names and time zones. For a first run, review paths, identity mappings and target
 tenors, and keep the `auto` calculation mode. The `correlation`, `cross` and `arbitrage` layers stay
 disabled. Advanced controls are documented so changes are deliberate and auditable,
@@ -27,6 +27,8 @@ not because every setting needs manual tuning. By default, `tune` compares only 
 options. All other TOML settings remain fixed.
 
 **Fallback change:** without usable own adjustments, EEX is smoothed over complete publication windows; it is never copied directly as the fallback. Section 16 explains averages, monthly cascading, controls and audit.
+
+**Shape layer:** section 17 and [SHAPE.md](SHAPE.md) document the implemented optional stage after refill. The cases and formulas below describe the pre-shape calculation (also the final result with default `shape.mode="off"`). Raw input is always retained; final original prices may move only with explicit `shape.adjust_originals=true`. Active shape adds its own trace and before-values.
 
 ## 0. Understand the product before reading the formulas
 
@@ -129,7 +131,7 @@ recorded and that date does not train memory using the stale reference.
 A strip requires complete contiguous coverage and weights prices by hours. A residual values
 the tail as `(parent_price×parent_hours−head_value)/tail_hours`. A small tail amplifies errors
 by `parent_hours/tail_hours`; there is currently no dedicated limit on that amplification.
-Diagnostics report inconsistencies without modifying originals to force aggregates to agree.
+The refill diagnostics report inconsistencies without forcing aggregates to agree. Optional shape subsequently optimizes soft aggregate penalties; originals remain fixed unless movement is explicitly enabled.
 
 ### 0.5. The decision tree as a human review
 
@@ -295,7 +297,9 @@ additive when an anchor fails. The common filter can reject an observation in bo
 Section 3, step 3b, details limits, flags and selection cases; section 16 explains simple/EWMA,
 and section 7 explains hist-auto.
 
-#### Case 1. A valid original exists: preserve it
+#### Case 1. A valid original exists: preserve it during refill
+
+The optional final shape stage keeps it fixed by default. With `shape.mode="adjust"` and `shape.adjust_originals=true`, its final curve price may change within limits; its input VWAP remains intact. See section 17.
 
 **Meaning and trigger.** The row contains a numeric, finite VWAP. Suppose own M+1 is **110**
 although EEX for that period is **100**. Enriched output keeps 110 in `vwap` and `curve_price`:
@@ -356,6 +360,88 @@ Smoothed EEX does not supply the other 40%; that share goes to a zero adjustment
 are absent/rejected or local is disabled, try permitted history/cross; without any component,
 try smoothing. Without target EEX, even +10 cannot produce a price through this route.
 
+<a id="local-month-quarter-example"></a>
+
+##### Worked note: why a quarter can outweigh a month
+
+The same-kind factor is a preference, not a rule that months can use only months. Consider
+this synthetic run for **2026-09-30, DE Base, EUR/MWh, Europe/Berlin**:
+
+| Anchor | Absolute delivery | Own | EEX | Volume | Additive / ratio basis |
+|---|---|---:|---:|---:|---|
+| M+1 | October 2026 | 110 | 100 | 100 | +10 / +10% |
+| Q+2 | January–March 2027 | 120 | 150 | 100 | −30 / −20% |
+
+Only the local layer is active in this experiment: history, cross, correlation and arbitrage
+are disabled. There are no earlier own observations. Parameters are `tau_log=0.5`,
+`shrink_k=1`, and `other_kind_weight=0.6`; production configuration was not changed.
+
+For each target/anchor pair:
+
+```text
+t = days from the reference date to the delivery period's midpoint
+L = ln(1 + max(t, 0.5))
+distance_factor = exp(−abs(L_target − L_anchor) / 0.5)
+raw_weight = ln(1 + volume) × kind_factor × distance_factor
+local_share = raw_weight / sum(raw_weights)
+```
+
+The kind factor is **1 for the same kind and 0.6 for a different kind**, applied before
+normalization. Both volume factors are `ln(101)=4.615121`. Actual midpoint times are
+**M+1: 16.5 days; M+2: 47; M+3: 77.5; Q+2: 138**. This is not a distance between label
+numbers such as 1 and 2, nor a test of whether delivery periods overlap.
+
+| Target | Anchor | Kind factor | Distance factor | Raw weight | Share of local blend |
+|---|---|---:|---:|---:|---:|
+| M+2 | M+1 | 1 | 0.132921007 | 0.613446466 | 65.00755% |
+| M+2 | Q+2 | 0.6 | 0.119248486 | 0.330207681 | 34.99245% |
+| M+3 | M+1 | 1 | 0.049697757 | 0.229361136 | 20.61616% |
+| M+3 | Q+2 | 0.6 | 0.318940531 | 0.883169393 | 79.38383% |
+
+**For M+2**, the distance factors are similar, so M+1's same-kind factor gives it the larger
+share. **For M+3**, Q+2's much larger distance factor overcomes its 0.6 kind penalty.
+December M+3 is outside the January–March Q+2 period. Their midpoints are almost equally far
+apart in ordinary days: 61 days from M+3 to M+1 and 60.5 to Q+2. However, logarithmic distances
+are `ln(78.5/17.5)=1.500897744` and `ln(139/78.5)=0.571375308`. Relative position on this
+logarithmic time scale, not overlap or ordinary day distance alone, produces the different weights.
+Those expressions compare ratios of `1+t`: approximately **4.486** versus **1.771**.
+
+These percentages are **shares inside the local blend**, not percentages of the price or
+net contributions after signs and shrinkage. M+1 has a positive basis while Q+2 has a negative
+one. Their signed mixture is then moderated by `w=W/(W+1)`. With history/cross absent, the
+remaining share goes to zero adjustment, not to a smoothed EEX price.
+
+| Target | EEX | Local weight w | Remaining zero-adjustment weight | Additive price | Ratio price |
+|---|---:|---:|---:|---:|---:|
+| M+2 | 110 | 0.485505 | 0.514495 | 108.059446 | 109.734182 |
+| M+3 | 120 | 0.526634 | 0.473366 | 108.543848 | 111.269366 |
+
+For example, M+3's additive local basis is
+`0.206161656×10 + 0.793838344×(−30) = −21.753534`; multiplying by w gives −11.456152,
+then adding EEX 120 gives 108.543848. Ratio uses the same shares with bases +0.10 and −0.20,
+giving a local basis of −0.138151503, a final basis of −0.072755287, and price 111.269366.
+Weights match because both modes admit the same anchors here; changing eligibility can change
+the weights. Auto selects ratio for these admissible positive anchors.
+
+This run verifies how the implementation behaves, not which mode predicts real prices best.
+Adding permitted history retains the same local calculation under the same mode and eligible
+anchors, but replaces the zero prior as explained in Case 4.
+
+With `other_kind_weight=0` and `correlation=false`, quarters stop contributing local basis
+to months, including their own component months. In this experiment additive M+3 becomes
+121.865694, using only M+1. This does not guarantee better accuracy or quarterly consistency.
+History and other layers retain their own rules; enabled correlation can supply a measured
+between-group weight. Both admissible anchors participate in the default example: the
+larger share is a result of the weighting rule, not evidence that one is a better predictor.
+
+The normal output's `curve_anchors` lists at most three influential anchor names, not all
+weights. The table above exposes the arithmetic for this example; it does not introduce new
+output columns. Reconstructing a real row requires its inputs, EEX, mapping, configuration and
+the formulas above, including any additional eligible anchors.
+
+The [consistency note](#quarter-month-consistency-example) shows another consequence of
+this same experiment: preserving a quarter does not force its estimated months to match it.
+
 #### Case 4. Local adjustment and permitted history both exist
 
 Keep EEX **100**, local **+10** and `w=0.6`; now earlier additive history **+4** is current
@@ -372,6 +458,14 @@ basis 7.6. Source remains local because its weight dominates, while method revea
 prices without EEX. History is a comparable difference for that identity/mode, not yesterday's
 price. If history expires or hist-auto rejects it, return to local with zero prior: 106 under
 these assumptions. If local disappears but history remains valid, use the next case.
+
+The [month/quarter worked example](#local-month-quarter-example) still applies to the local
+part when history is enabled: history does not restrict today's anchors to the target's
+contract kind. With the same eligible anchors and parameters, local shares, W and w stay
+the same, provided the selected mode is also unchanged. With cross still off, the formula
+becomes `basis = w×local_basis + (1−w)×permitted_history` instead of
+using zero for the second term. In that example, history would receive weight 0.514495 for
+M+2 and 0.473366 for M+3; it does not replace or relabel either anchor.
 
 #### Case 5. No local adjustment today, but permitted history exists
 
@@ -478,6 +572,11 @@ can reduce coverage and smoothing can lag actual changes: better predictions are
 for **still-pending targets**: EEX cannot value them, or no own adjustment was usable and
 smoothing lacked a complete window. It does not compete with history or replace every price
 with one considered more consistent.
+
+Enabling this layer therefore does not automatically correct the [original quarter at 120
+whose estimated months average 130.637302](#quarter-month-consistency-example): those prices
+are already resolved. Reconstructing a missing point and reconciling the entire curve are
+different operations; this layer does not implement the latter.
 
 **Example without usable EEX.** Own October, November and December prices all equal **120**;
 Q4 is absent. The months exactly cover Q4 and have positive hours. Even if memory says +4,
@@ -869,7 +968,7 @@ without usable cross, the smoothed EEX fallback is attempted even if additive me
 choosing a mode does not enable a disabled layer. Cross can use its internal history for a
 surprise even when hist does not add its mean, as described in section 10.
 
-Original observations are preserved without estimation or automatic-selection flags.
+At the pre-shape stage, original observations are preserved without estimation or automatic-selection flags. A later explicit shape original adjustment has its own provenance.
 Without a target EEX price, `missing` applies unless you enable contract construction (`arbitrage`);
 auto does not create an absent EEX curve. Zero-hour targets remain `missing` in the engine.
 
@@ -902,16 +1001,22 @@ Anchors, historical means and surprises are never mixed across these different u
 **a) Local ratio: today's anchors.** A weighted average of their ratios:
 
 ```text
-weight_i = ln(1 + volume_i) × kind_i × exp(−abs(ln(1+t_gap) − ln(1+t_i)) / tau_log)
+L(t) = ln(1 + max(t, 0.5))
+weight_i = ln(1 + volume_i) × kind_i × exp(−abs(L(t_gap) − L(t_i)) / tau_log)
 ```
 
-- `ln(1+volume)`: more volume gives more weight, without one large anchor dominating everything.
+- `ln(1+volume)`: positive volume increases weight more slowly than linear weighting;
+  it does not cap an anchor's normalized influence. Unknown/nonpositive volume uses weight 1.
 - `kind_i`: 1 for the same contract kind, such as Month with Month; otherwise
   `other_kind_weight`, which defaults to 0.6.
 - `t`: days to the midpoint of delivery. Logarithmic distance compares relative distance
   along the curve, rather than treating every additional calendar day equally.
+  D+1 versus D+3 and M+1 versus M+3 are therefore not generally equal-distance pairs:
+  resolved dates and period lengths matter. The
+  [worked month/quarter note](#local-month-quarter-example) shows how this can outweigh
+  the different-kind penalty.
 
-Illustrative M+3 gap (December 2026, t = 78.5 days):
+Earlier illustrative M+3 gap (reference 2026-09-29, December 2026, t = 78.5 days):
 
 | Anchor | ln(1+vol) | Kind | Distance | Weight | Share of total |
 |---|---|---|---|---|---|
@@ -1053,13 +1158,46 @@ original input rows remain preserved in the enriched output.
 Ratio mode limits the final adjustment to `±max_ratio_deviation`, setting
 `ratio_adjustment_limited` when clipped. `source` summarizes the dominant contribution;
 `estimation_method` and adjustment columns expose the actual combination. The enriched file
-always preserves each valid original row's own VWAP, even if the aggregated curve differs.
+always preserves each valid original row's raw VWAP, even if the aggregated curve differs. Its final `curve_price` changes only when the optional shape stage explicitly permits original adjustment.
 
 ### Step 6 — Consistency checks
 
 Compare each Q with its months, each Season with its quarters and each Cal with its quarters,
-using the filled curve. Deviations go to `consistency_history.csv`. **They are reported, not
-corrected**: observed VWAPs do not have to agree exactly across aggregations.
+using the filled curve. Deviations go to `consistency_history.csv`. **With shape off they are
+reported, not corrected**: observed VWAPs need not agree exactly. Active shape adds before/after
+stages and soft penalties, without guaranteeing equality.
+
+<a id="quarter-month-consistency-example"></a>
+
+The [synthetic month/quarter example](#local-month-quarter-example) makes the distinction
+concrete. Its starting EEX monthly and quarterly prices agree by delivery hours. Own Q+2,
+however, is 120 and remains an original, while each missing January–March month receives its
+own local weights and shrinkage:
+
+| Delivery month | EEX | Base Europe/Berlin hours | Estimated additive price | Estimated ratio price |
+|---|---:|---:|---:|---:|
+| January 2027, M+4 | 150 | 744 | 132.239522 | 132.447322 |
+| February 2027, M+5 | 150 | 672 | 128.569541 | 128.664736 |
+| March 2027, M+6 | 150 | 743 | 130.903094 | 130.987924 |
+
+EEX is **150 in each of the three months**, as well as 150 for the quarter. The resulting
+aggregates in this experiment are:
+
+| Mode | Preserved own Q+2 | Estimated months' hours-weighted price | Q+2 minus price from months |
+|---|---:|---:|---:|
+| Additive | 120 | 130.637302 | −10.637302 |
+| Ratio / auto in this example | 120 | 130.767734 | −10.767734 |
+
+The component price is `sum(month_price×delivery_hours)/sum(delivery_hours)`, not an
+unweighted three-month mean. A quarterly anchor can strongly influence its months without
+imposing an equality constraint. This experiment ran without shape. Its diagnostic exposes the discrepancy without changing
+the original 120 or forcing the estimated months to match it. Section 17 documents optional shape. Enabling arbitrage would not
+reconcile already resolved prices: [Case 8](#case-8-optional-contract-reconstruction-arbitrage)
+explains that it handles pending targets. These synthetic discrepancies demonstrate mechanics,
+not a predictive ranking or a guarantee of economic consistency.
+
+For this Base Europe/Berlin delivery, January has 744 hours, February 672 and March 743;
+the component weights account for the daylight-saving transition.
 
 ---
 
@@ -1164,7 +1302,7 @@ summary or `status`.
 
 ## 6. Parameters (`config.toml`)
 
-Summary of the main controls. **Section 14 details all 51 config.toml keys**, including
+Summary of the main controls. **Section 14 details all 58 config.toml keys**, including
 aliases, time zones, sensitivity, conditions of use and constraints.
 
 **Layers** (`[layers]`) control execution without code changes:
@@ -1552,8 +1690,8 @@ obtained from an already observed equivalent contract with another label.
 | `curve_unit` | Normalized identity unit; does not imply currency or unit conversion |
 | `curve_tenor` | Relative tenor label |
 | `curve_row_type` | `original`, `original_invalid` or `added`, relative to the input |
-| `curve_price` | Usable price; preserves each valid original VWAP and supplies an estimate for an invalid one when possible |
-| `curve_source` | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage` or `missing` |
+| `curve_price` | Usable final price. Own prices stay fixed by default; explicit shape original adjustment can change this field while retaining raw VWAP. Invalid cells can receive estimates. |
+| `curve_source` | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage` or `missing`; accepted shape changes add `+shape`, including `own+shape` |
 | `curve_area` | Mapped area |
 | `curve_profile` | Mapped profile |
 | `curve_kind` | Resolved contract kind: Day, Month, Quarter, etc. |
@@ -1561,7 +1699,7 @@ obtained from an already observed equivalent contract with another label.
 | `curve_delivery_start` | Inclusive delivery start |
 | `curve_delivery_end` | Exclusive delivery end |
 | `curve_hours` | Target contract hours under its delivery profile and time zone |
-| `curve_confidence` | Heuristic score described in section 4 |
+| `curve_confidence` | Heuristic score described in section 4; empty on prices changed by shape |
 | `curve_basis_mode` | Selected `ratio`/`additive`; originals and `eex+smooth` do not apply a basis formula |
 | `curve_configured_basis_mode` | Requested configuration: `auto`, `ratio` or `additive` |
 | `curve_own_vwap` | Own observation; valid original rows show their individual value |
@@ -1570,7 +1708,7 @@ obtained from an already observed equivalent contract with another label.
 | `curve_eex_method` | Exact/strip/residual method of the EEX reference. If fallback fails and arbitrage succeeds, this retains the reference method when present; otherwise it uses arbitrage method. Final reconstruction is in `estimation_method=contract_*` |
 | `curve_eex_asof` | Selected EEX curve date, allowing its age to be checked |
 | `curve_eex_fallback_trace` | Complete smoothed-fallback JSON: prices, weights, publications and monthly cascade; empty outside that branch |
-| `curve_basis` | Final applied adjustment, after any configured ratio clipping |
+| `curve_basis` | Pre-shape EEX adjustment, after any configured ratio clipping; shape has a separate additive delta |
 | `curve_basis_local` | Adjustment from today's anchors |
 | `curve_basis_hist` | Historical adjustment allowed by layer settings and freshness |
 | `curve_cross_adj` | Additional related-product correction, if used |
@@ -1586,6 +1724,9 @@ That neither deletes the original nor makes its value an estimate. `anchor_exclu
 adjusting other contracts.
 
 ### 12.2. Reconstructing a calculation
+
+**Shape audit:** when active, first reconstruct the pre-layer calculation using `curve_price_before_shape` and `curve_source_before_shape`. Then check the accepted `curve_shape_adjustment` or audit proposal against `curve_shape_trace`. Basis and fallback traces remain evidence for the pre-layer result. The [shape output dictionary](OUTPUT.md#shape-output) defines all eleven added fields; section 17 explains their effect on originals.
+
 
 For `curve_source=eex+smooth`, follow the JSON in section 16 and OUTPUT directly; the basis
 steps below apply to local/hist/cross estimates.
@@ -1619,8 +1760,10 @@ For an estimated `M+4` row, review the following:
    configured ratio limit and compare with `curve_basis`. Finally compute
    `EEX × (1 + basis)` in ratio mode or `EEX + basis` in additive mode.
 7. **Consistency.** If the price contributes to a month/quarter/year, inspect
-   `consistency_history.csv`. Deviations are reported; the engine neither changes originals
-   nor reoptimizes the full curve to eliminate them.
+   `consistency_history.csv`. With shape off, deviations are diagnostic. With shape active,
+   compare the before/after (or proposed) stages and audit `curve_shape_trace`; its soft
+   penalties can reduce deviations but do not guarantee equality. Use `curve_price_before_shape`
+   for the preceding pricing formulas. Originals move only if explicitly enabled.
 
 For `source = eex+smooth`, reconstruct the average and spreads in `curve_eex_fallback_trace`; do not apply a basis formula to the recorded settlement. For `arbitrage`, reconstruct the
 strip or residual from available daily prices, because no basis blend was applied. For
@@ -1643,6 +1786,12 @@ Real-world validation should measure coverage and errors by product and tenor fa
 distinguishing days with and without anchors, current versus stale EEX, and exact prices
 versus strips/residuals. This evaluation with the real input and matching EEX history remains
 pending; the earlier synthetic result tables do not replace it.
+
+For a human guide to current evaluation, shape diagnostics and proposed missing-data protocols,
+see [Backtesting: what is measured, and what still needs testing](BACKTEST.md).
+Its [shape investigation](BACKTEST.md#shape-investigation) records primary sources and 27
+sensitivity runs: midpoint-based quarterly influence can introduce a monthly trough even
+when all three monthly EEX references are equal.
 
 ## 13. Moving the program to the machine containing the real data
 
@@ -1738,7 +1887,7 @@ or enrich the complete input. See section 5.
 
 ## 14. Complete configuration reference: what controls each decision
 
-This chapter is a complete reference to the **51 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
+This chapter is a complete reference to the **58 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
 
 The tables distinguish a parameter's effect from the conditions under which it matters. Numeric operating ranges are guidance unless explicitly described as loader validation. Validate finite values and sensible ranges when editing the configuration; the loader does not enforce every recommended bound.
 
@@ -1866,6 +2015,21 @@ remain. A nonfinite calculated result is an error and prevents result writes.
 
 
 ---
+
+### Optional post-refill shape controls
+
+All seven implemented controls are listed here to complete the 58-key inventory. Section 17 explains the objective, examples and output semantics. These numeric defaults are uncalibrated starter values.
+
+| Key | Default | Meaning and effect |
+|---|---|---|
+| `shape.mode` | `"off"` | `off`, `audit` or `adjust`. Other controls have no price effect while off. |
+| `shape.adjust_originals` | `false` | Boolean. True permits eligible own curve prices to move; raw input columns still remain untouched. In audit only proposals move. |
+| `shape.smoothness_weight` | `1.0` | Finite, ≥0. Higher favors smaller second differences in monthly Own-minus-EEX adjustment. Zero removes this penalty. No effect where a valid three-month reference is unavailable. |
+| `shape.coherence_weight` | `10.0` | Finite, ≥0. Higher favors closer hours-weighted aggregate agreement. Zero removes this penalty. No effect on incomplete aggregates. |
+| `shape.coherence_tolerance` | `0.01` | Finite, ≥0. Diagnostic absolute aggregate-residual margin in the curve's price unit. Larger relaxes the reported test; it does not change prices or impose a hard constraint. No overall verdict without applicable aggregate terms. |
+| `shape.max_abs_adjustment` | `10.0` | Finite, >0. Maximum total absolute price movement per node. Larger allows more changes, not necessarily better estimates. Check the curve's unit; no currency conversion occurs. |
+| `shape.original_weight` | `10.0` | Finite, ≥1. Fidelity weight for movable originals versus 1 for estimates. Higher resists moving originals. Has no movement effect while originals are fixed. |
+
 
 ## 15. Select parameters against real originals: `tune`
 
@@ -2014,6 +2178,17 @@ an incomplete cascade from being published. Count months from the reference date
 stale publication's date or the first configured target. With `anchor_months=1` the cascade
 starts at M0; with 3 it starts at M2.
 
+**Calendar rollover can change the estimate of the same delivery contract without a new
+publication.** In the audited synthetic example, November 2026 moves from M+2 on September
+30 to M+1 on October 1: its cascade estimate is 114 before rollover and its direct EWMA is
+116.659473 afterwards, despite the same raw settlement of 118 and the same September 30
+publication. The reference month's movement changes the anchor set and calculation route;
+it does not identify the wrong delivery period. Moving the last anchor can also change
+months that remain in the cascade. Track `delivery_start` and `delivery_end`, rather than
+comparing the same relative label across months. See the [fixed-contract rollover
+audit](BACKTEST.md#rollover-audit) for the calculation, the unchanged quarter comparison and
+limitations. This documents current behavior; no continuity correction has been implemented.
+
 Day, Week, Weekend, Quarter, Season, Year, BOM and BOW average **their own absolute period**
 directly across the price window. They are not automatically replaced with smoothed months.
 The method retains historical monthly differences but does not force a quarter to equal its
@@ -2071,7 +2246,7 @@ anchor_months = 2
 These controls do not change originals or prices with local/historical/cross adjustments.
 Price and spread windows are independent: neither must be larger than the other.
 Maximum staleness governs the latest accepted snapshot; it does not turn the windows into
-calendar-day windows. The 51 configuration keys include these five controls.
+calendar-day windows. The 58 configuration keys include these five controls.
 
 Override them for one `daily`, `refill`, `catchup`, `backtest` or `tune` execution:
 
@@ -2106,3 +2281,205 @@ Apply this change to existing results with `refill --from ... --to ...` or
 `daily --date ...` on chosen dates. Catchup only recovers pending groups: an existing row,
 including `missing` or an estimate from an earlier version, is already processed and is not
 recalculated merely because the program was updated.
+
+<a id="shape-layer"></a>
+
+## 17. Implemented optional shape layer after refill
+
+This implemented layer runs **after the normal refill calculation** and is disabled by default.
+It can inspect or adjust an already calculated curve. It seeks a compromise between small
+changes, smoother monthly adjustments to EEX and closer agreement between months and their
+quarters/years. Smoother output is not evidence of better predictive accuracy.
+
+Raw input columns, including each original `vwap`, are always retained in enriched output.
+The usable final price is `curve_price`. By default even this price is protected on original
+observations; `shape.adjust_originals=true` explicitly permits changing it. Original
+observations used to train history and cross remain the input observations, never the adjusted output.
+
+### Three operating modes
+
+- `off`: the pre-existing price calculation and output schema are unchanged.
+- `audit`: calculate proposed adjustments and diagnostics, but keep published prices unchanged.
+- `adjust`: apply a validated solution within the configured bounds.
+
+Begin with `audit` to see which observations would move and which discrepancies would remain.
+This is a separate step from `basis_mode=auto|ratio|additive` and from EEX price averaging.
+
+### What participates
+
+The layer groups each reference date and full `(product, region, unit)` identity separately,
+using its mapped profile, timezone and delivery hours. It considers finite prices for full
+Month, Quarter and Year periods. Active shape processing also includes eligible own labels of
+these kinds outside `targets.tenors`, so original aggregates can constrain the same day's
+curve and receive an auditable adjustment when permitted.
+
+A quarter needs all three full months and a year all twelve, with compatible hours. The layer
+does not create missing months, use a partly covered aggregate, or fill missing prices. Days,
+weeks, seasons, BOM and BOW are outside this initial scope. Aliases of one absolute period
+are deduplicated: several labels do not create independent evidence or duplicate constraints.
+
+For monthly smoothness, three complete consecutive months must have finite EEX references
+with the same `eex_asof`. The reference is the current accepted **raw `eex_settle`**, which can
+be reconstructed by the EEX Pricer; it is not the fallback EWMA/monthly-cascade price. There
+is no new smoothing or fallback route for these references. Missing EEX disables that
+smoothness term, but a complete quarter/year coherence term can still be used without EEX.
+
+### One joint objective
+
+Let `p_i` be a finite price before shape, `x_i` its proposed price, `E_m` a monthly EEX
+reference, and `H_m` the delivery hours of month `m`. The solver minimizes a sum of squares:
+
+```text
+sum_i fidelity_weight_i * (x_i - p_i)^2
++ smoothness_weight * sum_valid_triplets [(x[m]-E[m]) - 2*(x[m+1]-E[m+1]) + (x[m+2]-E[m+2])]^2
++ coherence_weight * sum_complete_aggregates [x_parent - sum_m(H_m*x_m)/sum_m(H_m)]^2
+```
+
+Here `x[m+1]` denotes the next month's price.
+Smoothness penalizes a second difference along consecutive month indices; it does not penalize
+the full price curve, require equal monthly prices, or impose positivity. This additive
+difference works with zero and negative prices even if the preceding refill used ratio mode.
+Seasonal structure in EEX remains a reference, rather than a prediction target.
+
+Estimated nodes have fidelity weight 1. Movable original nodes have `original_weight`.
+Original nodes are fixed when `adjust_originals=false`; otherwise they may move within the
+same absolute limit as other eligible nodes. The bound is always measured from the
+**pre-shape** price: `abs(x_i-p_i) <= max_abs_adjustment`, in that curve's price unit.
+
+Aggregate agreement is soft. Large `coherence_weight` gives disagreement a larger cost,
+but neither an original nor an estimated quarter is guaranteed to equal its months exactly.
+Fixed conflicting originals and movement bounds can prevent equality. A remaining residual
+is a reported compromise, not automatically a solver failure. Smoothness and coherence are
+solved jointly; no alternating smoothing/reconciliation loop is used.
+
+The implementation uses NumPy and a bounded convex solver with KKT validation. On solver
+failure or an invalid candidate, it retains pre-shape prices and reports the failure. No
+invalid partial solution is accepted. Current heuristic confidence is not treated as variance;
+changed prices receive empty confidence because the new uncertainty is uncalibrated.
+
+**Coherence tolerance is a diagnostic, not a hard constraint.** `shape.coherence_tolerance=0.01`
+compares the absolute monthly-average-minus-parent residual with 0.01 in the curve's price
+unit. Increasing it relaxes the reported test; decreasing it tightens it. It changes neither
+the optimizer nor the accepted price. Soft penalties, protected originals and movement
+bounds can leave a result outside tolerance. Audit flags the proposal; adjust flags the
+published result. The trace reports each aggregate test and the overall result, or null
+when there is no applicable aggregate. The same numeric setting is interpreted in each
+curve's own unit; it is not a percentage or a currency conversion.
+
+### Configuration and command overrides
+
+These are implemented keys in `config.toml`. Numeric defaults are starter values, **not calibrated recommendations**.
+
+| Key | Default | Meaning and effect |
+|---|---|---|
+| `shape.mode` | `"off"` | `off`, `audit` or `adjust`. Other controls have no price effect while off. |
+| `shape.adjust_originals` | `false` | Boolean. True permits eligible own curve prices to move; raw input columns still remain untouched. In audit only proposals move. |
+| `shape.smoothness_weight` | `1.0` | Finite, ≥0. Higher favors smaller second differences in monthly Own-minus-EEX adjustment. Zero removes this penalty. No effect where a valid three-month reference is unavailable. |
+| `shape.coherence_weight` | `10.0` | Finite, ≥0. Higher favors closer hours-weighted aggregate agreement. Zero removes this penalty. No effect on incomplete aggregates. |
+| `shape.coherence_tolerance` | `0.01` | Finite, ≥0. Diagnostic absolute aggregate-residual margin in the curve's price unit. Larger relaxes the reported test; it does not change prices or impose a hard constraint. No overall verdict without applicable aggregate terms. |
+| `shape.max_abs_adjustment` | `10.0` | Finite, >0. Maximum total absolute price movement per node. Larger allows more changes, not necessarily better estimates. Check the curve's unit; no currency conversion occurs. |
+| `shape.original_weight` | `10.0` | Finite, ≥1. Fidelity weight for movable originals versus 1 for estimates. Higher resists moving originals. Has no movement effect while originals are fixed. |
+
+```toml
+[shape]
+mode = "off"
+adjust_originals = false
+smoothness_weight = 1.0
+coherence_weight = 10.0
+coherence_tolerance = 0.01
+max_abs_adjustment = 10.0
+original_weight = 10.0
+```
+
+The five pricing/evaluation commands `daily`, `refill`, `catchup`, `backtest` and `tune`
+accept all seven overrides: `--shape-mode`, `--shape-adjust-originals on|off`,
+`--shape-smoothness-weight`, `--shape-coherence-weight`, `--shape-coherence-tolerance`,
+`--shape-max-abs-adjustment` and `--shape-original-weight`. They do not rewrite the TOML.
+
+```powershell
+python run.py daily --date 2026-09-30 --shape-mode audit
+python run.py refill --from 2026-09-01 --to 2026-09-30 --shape-mode adjust --shape-adjust-originals off
+python run.py daily --date 2026-09-30 --shape-mode adjust --shape-adjust-originals on --shape-original-weight 20
+```
+
+Use daily/refill to recalculate existing dates after changing shape settings. Catchup treats
+an existing missing result as processed and does not automatically replace completed groups.
+
+### Worked comparison: protect or move an original
+
+This calculation was checked directly with the implemented solver. Use January–March 2027
+Base delivery hours 744, 672 and 743, three estimated monthly prices of 100, an original
+quarter at 130, and each monthly EEX reference at 100 from the same publication. Keep the
+initial weights (smoothness 1, coherence 10, original fidelity 10) and maximum movement 10.
+
+| Mode | Allow original movement? | Published monthly prices | Published original quarter | Proposed month/quarter |
+|---|---|---|---:|---|
+| `adjust` | No | 110, 110, 110 | 130 | 110 / 130 |
+| `adjust` | Yes | 110, 110, 110 | 120 | 110 / 120 |
+| `audit` | Yes | 100, 100, 100 | 130 | 110 / 120 |
+
+All month changes reach the +10 bound. With original movement allowed, the quarter reaches
+−10 and becomes an estimated final curve price, while its raw input remains 130. The
+monthly-minus-quarter residual falls from −30 to −20 with protection, or to −10 without it;
+it does not become zero. All three monthly adjustments are equal, so the second-difference
+penalty is zero. This demonstrates bounds and provenance, not a prediction-quality gain.
+
+### Reading a change without losing the observation
+
+Suppose an original input VWAP is 120. With original adjustment disabled, its final
+`curve_price` remains 120 even if estimates around it move. If enabled and the validated
+solution changes it to 122, the raw `vwap` stays 120 but `curve_price=122`,
+`data_origin=estimated`, `source=own+shape` and
+`estimation_method=shape_adjusted_original`. This is an illustrative possible result,
+not a promise that the solver will choose 122.
+
+If duplicate physical rows are 118 and 122 and their engine aggregate moves by +2, their
+enriched final prices become 120 and 124. Each retains its own raw value and its own
+`curve_price_before_shape`; the trace records the aggregate solve. Do not replace every
+duplicate with the same aggregate price.
+
+For changed estimates, source and estimation method gain `+shape`. Audit retains the
+original final price/source/method and reports only proposed changes. Active outputs add
+before-values, actual and proposed deltas, original-modification status and a JSON trace;
+the [output dictionary](OUTPUT.md) lists every column. Existing basis, anchors and fallback
+traces explain the **pre-shape** calculation, not the adjusted price by themselves.
+
+### History and validation
+
+The structural solve needs no extra historical window beyond the refill data and same-date
+references already available. Normal refill history, staleness and complete EEX-window
+requirements still apply. Selecting weights and movement limits needs real historical
+evaluation across seasons, horizons, missing blocks and calendar rolls; a year count alone
+cannot establish adequate coverage.
+
+`pipeline_configured` in backtest includes shape after the held-out period and its aliases
+have been hidden. History continues to learn only actual originals after prediction.
+Tune still searches the same six existing refill dimensions; shape settings stay fixed
+through its grid and are retained in the configuration snapshot. Comparing shape settings
+requires separate controlled runs with the same evaluation cases.
+
+This layer does not guarantee continuity of a fixed contract across reference dates.
+The [rollover audit](BACKTEST.md#rollover-audit) remains a separate temporal concern.
+Using a jointly smoothed EEX template, changing monthly fallback routing, or adding temporal
+regularization are different proposals, not features of this layer.
+
+### Why this is power-specific, and what the EEX sample showed
+
+Aggregation is justified only when a contract represents the same delivery as its constituent
+periods under compatible specifications. EEX documents cascading across delivery periods;
+this software's power profiles and hours do not automatically apply to agricultural futures.
+For example, CME corn uses a 5,000-bushel contract specification, not this program's power-hour
+weighting. Another asset requires a contract-specific model before reusing the aggregation
+rule. [EEX contract details](https://www.eex.com/en/trading-resources/product-specifications/contract-details-product-codes);
+[CME corn specification](https://www.cmegroup.com/markets/agriculture/grains/corn/specs).
+
+In the inspected local EEX copy, 13 Base/Peak files across seven areas supplied **1,125 complete
+quarter/month comparisons** with publications from 2026-08-10 to 2026-10-06. All quarter
+settlements were within 0.004396 of their delivery-hours-weighted monthly average and thus
+within 0.01. No comparison had the quarter and all three month prices equal within 0.01.
+Near aggregate agreement does not mean a flat curve.
+
+These results describe that sample and available complete cases, not a universal market
+guarantee or expected agreement of separately observed own VWAPs. Local audit artifacts are
+`output/eex_quarter_audit/summary.csv` and `comparisons.csv`; they are Git-ignored and are
+not distributed. They do not calibrate the shape layer or prove improved missing-price accuracy.

@@ -77,12 +77,12 @@ weekend_offset = 0            # Own WE+n means weekend n+offset (WE+0 = the next
 # additive: always use price differences, which do not divide by EEX prices.
 # See the README for the decision rules and all configurable settings.
 basis_mode         = "auto"      # auto: select safely per target; ratio/additive: force one mode
-min_volume         = 0           # Minimum anchor volume; original VWAPs are ALWAYS preserved
+min_volume         = 0           # Minimum anchor volume; original inputs and pre-shape prices are preserved
 tau_log            = 0.5         # Anchor reach along the curve (log days to delivery)
 other_kind_weight  = 0.6         # Weight for another contract kind (Month vs Quarter...)
 shrink_k           = 1.0         # Today's weight w = W / (W + k); evidence needed to trust today
 ewma_halflife_days = 10          # Historical adjustment memory (observation days)
-max_anchor_dev     = 0           # If >0, reject extreme anchors; never replace original VWAPs
+max_anchor_dev     = 0           # If >0, reject extreme anchors from refill; shape may separately adjust final prices
 ratio_eex_floor    = 1.0         # Reject near-zero ratio anchors; auto also uses additive for near-zero targets
 max_ratio_deviation = 1.0       # Maximum |VWAP/EEX - 1| for ratio anchors and final adjustments
 hist_max_age_days  = 60          # Expire factors this long after the latest real observation
@@ -97,6 +97,20 @@ price_window = 5               # Latest EEX publication dates, including the ava
 ewma_halflife = 2.0            # Weight halves every 2 observations inside the finite price window
 spread_window = 9              # Simple mean of raw consecutive-month spreads over this many dates
 anchor_months = 2              # First months from the current calendar month: 2 means M+0 and M+1
+
+
+[shape]
+# Diagnostic threshold for "nearly coherent" aggregates in the curve's price unit.
+# This reports residual violations; it is not a hard solver constraint.
+coherence_tolerance = 0.01
+# Optional post-refill processing: off disables it; audit proposes; adjust applies.
+# Original input observations and pre-shape prices remain available for audit.
+mode = "off"
+adjust_originals = false       # Explicit permission to change final prices derived from originals
+smoothness_weight = 1.0        # Penalize irregular correction to raw eex_settle, not raw price seasonality
+coherence_weight = 10.0        # Soft aggregation penalty; does not enforce exact Q/Cal equality
+max_abs_adjustment = 10.0      # Uncalibrated starting limit in each curve's price unit; choose per use case
+original_weight = 10.0         # Fidelity to originals if changes are allowed; must be at least 1
 
 
 [correlation]

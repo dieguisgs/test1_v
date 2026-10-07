@@ -20,6 +20,11 @@ package = false
 dev = [
     "pytest>=8.0",
 ]
+notebook = [
+    "jupyterlab>=4",
+    "ipywidgets>=8",
+    "plotly>=5",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

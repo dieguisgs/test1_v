@@ -1,6 +1,6 @@
 # Diccionario de salidas
 
-Versión inglesa: [OUTPUT.md](OUTPUT.md). Reglas de cálculo: [ALGORITMO.md](ALGORITMO.md).
+Versión inglesa: [OUTPUT.md](OUTPUT.md). Reglas de cálculo: [ALGORITMO.md](ALGORITMO.md). Capa final opcional: [SHAPE.es.md](SHAPE.es.md).
 
 Todas las claves de curva utilizan **fecha de referencia + product + region + unit + etiqueta de tenor**. Una región o unidad vacía es un valor literal de identidad. Los precios y errores absolutos usan la `unit` de su fila; no se convierten divisas. Los CSV usan UTF-8 con BOM, separador de coma y cabecera. Una celda numérica o de fecha vacía significa no disponible o no aplicable, nunca cero. Los precios cero y negativos son valores finitos válidos.
 
@@ -48,19 +48,19 @@ Los nombres de entrada `data_origin`, `estimation_method` y los que empiezan por
 
 | Columna | Tipo y valores | Significado |
 |---|---|---|
-| `data_origin` | Texto: `original`, `estimated`, `missing` | Procedencia del precio utilizable `curve_price`. Un VWAP original finito sigue siendo `original`, incluso cero o negativo. Una fila original inválida puede recibir una estimación en `curve_price`. |
-| `estimation_method` | Texto; reglas más abajo | `none` en todo original válido y en todo precio enriquecido no disponible; en otro caso, método que proporciona el precio. |
+| `data_origin` | Texto: `original`, `estimated`, `missing` | Procedencia del precio utilizable `curve_price`. Un VWAP original finito sigue siendo `original` salvo que shape cambie expresamente su precio utilizable, que pasa a `estimated`; su celda bruta se conserva, también si vale cero o negativo. Una fila original inválida puede recibir una estimación en `curve_price`. |
+| `estimation_method` | Texto; reglas más abajo | `none` en todo original válido sin cambiar y en todo precio enriquecido no disponible; `shape_adjusted_original` si shape cambia el precio original; en otro caso, método que proporciona el precio. |
 | `curve_reference_date` | Fecha ISO | Fecha interpretada, independiente del formato original. |
 | `curve_product`, `curve_region`, `curve_unit` | Texto | Identidad normalizada de la curva. |
 | `curve_tenor` | Texto | Etiqueta original en filas originales; etiqueta objetivo en filas añadidas. |
 | `curve_price` | Número o vacío | Precio original, estimado o ausente utilizable. Es el campo que debe usarse cuando la columna VWAP original contiene texto inválido. |
-| `curve_source` | Valores de source del motor | `own` para un original válido, aunque el motor no haya calculado esa fila. En otro caso, source del motor o `missing`. |
+| `curve_source` | Valores de source del motor | `own` para un original válido sin cambiar, aunque el motor no calcule esa fila; `own+shape` si se ajustó su precio de curva. En otro caso, source del motor o `missing`. |
 | `curve_row_type` | Texto: `original`, `original_invalid`, `added` | Indica si la fila física existía, tenía VWAP inutilizable o se añadió. Independiente de la procedencia del precio. |
 | `curve_flags` | Texto separado por `;` o vacío | Flags del motor más flags del enriquecido, descritos abajo. |
 
 **Las demás columnas del motor de la sección siguiente se copian con el prefijo `curve_`**, salvo `data_origin` y `estimation_method`, que siguen las reglas del enriquecido. La traza normal completa incluye además `curve_area`, `curve_profile`, `curve_kind`, `curve_period`, `curve_delivery_start`, `curve_delivery_end`, `curve_hours`, `curve_confidence`, `curve_basis_mode`, `curve_configured_basis_mode`, `curve_own_vwap`, `curve_own_volume`, `curve_eex_settle`, `curve_eex_method`, `curve_eex_asof`, `curve_eex_fallback_trace`, `curve_basis`, `curve_basis_local`, `curve_basis_hist`, `curve_cross_adj`, `curve_local_weight`, `curve_anchors`, `curve_cross_from` y **`curve_flag`**. Si el motor no produjo filas, solo están garantizadas las columnas fijas del enriquecido; las trazas opcionales dependen de la tabla del motor recibida.
 
-`curve_flag` copia sin cambios el `flag` singular del motor. `curve_flags` es el campo combinado del enriquecido. Son distintos. En originales válidos, `curve_price`, `curve_source` y, si existen, `curve_own_vwap`/`curve_own_volume` describen esa fila original concreta. Las demás trazas describen el punto correspondiente del motor: pueden estar vacías o referirse a un agregado de originales con el mismo periodo de entrega. Que exista una fila original no significa que se hayan calculado todos sus diagnósticos.
+`curve_flag` copia sin cambios el `flag` singular del motor. `curve_flags` es el campo combinado del enriquecido. Son distintos. En originales válidos, `curve_price`, `curve_source` y, si existen, `curve_own_vwap`/`curve_own_volume` describen esa fila original concreta. Un ajuste original permitido de shape cambia solo el precio utilizable y su procedencia; quedan disponibles el dato bruto y sus diagnósticos propios. Las demás trazas describen el punto correspondiente del motor: pueden estar vacías o referirse a un agregado de originales con el mismo periodo de entrega. Que exista una fila original no significa que se hayan calculado todos sus diagnósticos.
 
 Ejemplo ilustrativo, no observaciones reales de mercado; las tres filas pertenecen a una curva en EUR/MWh. `tenor2` es aquí el nombre configurado para tenor:
 
@@ -72,9 +72,9 @@ Ejemplo ilustrativo, no observaciones reales de mercado; las tres filas pertenec
 
 La tercera fila recibe también `original_vwap_missing_or_invalid`. Si pudiera estimarse, su `vwap` original seguiría siendo `invalid`; `curve_price` contendría la estimación y `data_origin` pasaría a `estimated`.
 
-## Salida filled: las 33 columnas del motor
+## Salida filled: las 33 columnas base del motor
 
-Estas columnas aparecen en `filled_history.csv` y los filled diarios. Hay una fila por etiqueta objetivo resoluble y curva/fecha `fill` activa. Un objetivo no resoluble no genera fila. Varias etiquetas pueden representar el mismo periodo de entrega.
+Estas columnas aparecen en `filled_history.csv` y los filled diarios. Hay una fila por etiqueta objetivo resoluble y curva/fecha `fill` activa; shape activa también incluye etiquetas propias Month/Quarter/Year para contexto. Un objetivo no resoluble no genera fila. Varias etiquetas pueden representar el mismo periodo de entrega.
 
 | Columna | Tipo / valores | Significado y casos vacíos |
 |---|---|---|
@@ -91,8 +91,8 @@ Estas columnas aparecen en `filled_history.csv` y los filled diarios. Hay una fi
 | `delivery_end` | Fecha ISO | Fin exclusivo de entrega. |
 | `hours` | Número, >=0 | Horas según perfil, zona horaria y tipo de objetivo; incorpora las reglas aplicables de calendario/cambio horario. |
 | `price` | Número finito o vacío | Precio del motor en `unit`; vacío cuando `source=missing`. |
-| `source` | Texto | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage`, `missing`; véase más abajo. |
-| `confidence` | Número, 0..1 | Diagnóstico heurístico, **no probabilidad ni precisión calibrada**. Own=1, missing=0, arbitrage=0.4. Con EEX usa 0.4 para el respaldo EEX suavizado o `0.5+0.4*local_weight`; multiplica por 0.85 si el contrato no es exacto y por 0.9 si el settlement es anterior; redondea a tres decimales. |
+| `source` | Texto | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage`, `missing`; los source cambiados por shape reciben `+shape`, incluido `own+shape`; véase más abajo. |
+| `confidence` | Número, 0..1, o vacío tras cambio shape | Diagnóstico heurístico, **no probabilidad ni precisión calibrada**. Own=1, missing=0, arbitrage=0.4. Con EEX usa 0.4 para el respaldo EEX suavizado o `0.5+0.4*local_weight`; multiplica por 0.85 si el contrato no es exacto y por 0.9 si el settlement es anterior; redondea a tres decimales. |
 | `data_origin` | Texto | `original` para own, `estimated` para precio calculado, incluido el respaldo EEX suavizado, y `missing` en otro caso. |
 | `estimation_method` | Texto | `none` para own, `unavailable` para missing o método de cálculo descrito abajo. |
 | `basis_mode` | Texto: `ratio`, `additive` | Modo efectivo seleccionado para este objetivo. En filas own/missing/eex+smooth no implica que se haya aplicado un ajuste. |
@@ -110,9 +110,9 @@ Estas columnas aparecen en `filled_history.csv` y los filled diarios. Hay una fi
 | `local_weight` | Número, 0..1, o vacío | Peso local de la combinación: `W/(W+shrink_k)` si hay evidencia local y cero en otro caso. Vacío si no se calculó ajuste EEX. |
 | `anchors` | Texto separado por comas o vacío | Etiquetas de las **tres entradas de ancla con mayor peso local**, no todas las que contribuyen. Una entrada puede contener varias etiquetas alias. No exporta pesos ni la trazabilidad completa. |
 | `cross_from` | Texto separado por comas o vacío | Etiquetas de otras curvas utilizadas con correlación redondeada a dos decimales: `product [region='...', unit='...'](0.85)`. No es una tabla de betas ni pesos. |
-| `flag` | Texto separado por `;` o vacío | Condiciones del motor descritas abajo. El precio propio se conserva aunque se excluya como ancla. |
+| `flag` | Texto separado por `;` o vacío | Condiciones del motor descritas abajo. Excluir un precio propio como ancla no lo cambia; la capa shape sí puede hacerlo con permiso explícito. |
 
-En `basis`, `basis_local`, `basis_hist` y `cross_adj`, **ratio se expresa como fracción**: `0.05` significa +5%, y `price = eex_settle * (1 + basis)`. En additive se usa la unidad del precio: `0.05` significa +0.05 EUR/MWh en una curva EUR/MWh, y `price = eex_settle + basis`. No deben combinarse ajustes de distintos modos como si tuvieran la misma unidad. `local_weight` es adimensional en ambos modos. Los precios propios pueden tener vacíos los diagnósticos del ajuste.
+En `basis`, `basis_local`, `basis_hist` y `cross_adj`, **ratio se expresa como fracción**: `0.05` significa +5%, y `price = eex_settle * (1 + basis)`. En additive se usa la unidad del precio: `0.05` significa +0.05 EUR/MWh en una curva EUR/MWh, y `price = eex_settle + basis`. No deben combinarse ajustes de distintos modos como si tuvieran la misma unidad. `local_weight` es adimensional en ambos modos. Los precios propios pueden tener vacíos los diagnósticos del ajuste. Con shape activa estas fórmulas explican `price_before_shape`; el precio final incorpora además `shape_adjustment`.
 
 ### JSON de auditoría del respaldo EEX suavizado
 
@@ -142,7 +142,7 @@ Python, usa `json.loads(celda)` cuando la celda no esté vacía.
 
 Auditoría: suma `price×weight` para obtener `price_average.value`; en cascada suma los
 `spread×weight` de cada eslabón y comprueba cada `price_after`. El último valor debe ser
-`price`. No lo reconstruyas con `eex_settle*(1+basis)`: el settlement conserva la referencia
+`price_before_shape` con shape activa, o `price` sin ella. No lo reconstruyas con `eex_settle*(1+basis)`: el settlement conserva la referencia
 sin suavizar y `basis/local_weight` están vacíos. Consulta la sección 16 de [ALGORITMO.md](ALGORITMO.md)
 para ventanas completas, M0/M1, ejemplo numérico y límites. Igualdad numérica con el último
 settlement puede ocurrir; no significa que se haya copiado como respaldo directo.
@@ -171,7 +171,7 @@ Los nueve casos se explican con ejemplos en la sección 0.9 de [ALGORITMO.md](AL
 - `ratio_` o `additive_`, seguido de los componentes disponibles en este orden fijo: `local`, `history`, `cross`, separados por guiones bajos. Ejemplos: `additive_local_history` o `ratio_history_cross`. Describe componentes disponibles en el cálculo, no asegura que cada aportación numérica sea distinta de cero.
 - `eex_price_simple`, `eex_price_ewma`: promedio directo del periodo. `eex_month_cascade_simple`, `eex_month_cascade_ewma`: media del mes ancla más spreads simples. El sufijo indica la media de precios, no la de spreads.
 - `contract_exact`, `contract_strip`, `contract_residual`: reconstrucción final cuando `arbitrage` está activado. `exact` usa el periodo coincidente; `strip` combina periodos contiguos ponderados por horas; `residual` obtiene la cola de un contrato mayor usando su tramo inicial cubierto. Sus componentes pueden ser precios propios o ya estimados.
-- El enriquecido convierte todo método no disponible en `none`. Si una fila añadida/original inválida recibe precio con `source=own`, el método es `own_equivalent_period`; se marca `estimated` porque esa fila física no contenía precio original utilizable. Reutiliza un periodo de entrega equivalente de la misma identidad y fecha de referencia, no el precio de ayer; no es arbitraje y sigue disponible con esa capa apagada. Todo original válido lleva `none`.
+- El enriquecido convierte todo método no disponible en `none`. Si una fila añadida/original inválida recibe precio con `source=own`, el método es `own_equivalent_period`; se marca `estimated` porque esa fila física no contenía precio original utilizable. Reutiliza un periodo de entrega equivalente de la misma identidad y fecha de referencia, no el precio de ayer; no es arbitraje y sigue disponible con esa capa apagada. Todo original válido sin cambiar lleva `none`; un original ajustado por shape lleva `shape_adjusted_original`.
 
 ### Flags
 
@@ -198,7 +198,7 @@ Los flags de motivo auto se emiten al calcular una estimación basada en EEX, no
 
 ## Consistencia
 
-`consistency_history.csv` solo contiene comparaciones disponibles: Quarter frente a meses, Season frente a trimestres y Year frente a trimestres. La ausencia de fila significa que no se produjo esa comparación, no prueba consistencia. Se informa de diferencias sin forzar los precios.
+`consistency_history.csv` solo contiene comparaciones disponibles: Quarter frente a meses, Season frente a trimestres y Year frente a trimestres. La ausencia de fila significa que no se produjo esa comparación, no prueba consistencia. Con shape off se informan diferencias sin reconciliar precios. Shape activa añade etapas y penalizaciones suaves; no garantiza igualdad.
 
 | Columnas | Significado |
 |---|---|
@@ -225,7 +225,7 @@ Los flags de motivo auto se emiten al calcular una estimación basada en EEX, no
 | `pred` | Predicción en `unit`. |
 | `error` | `pred - own`; positivo significa sobreestimación. |
 
-`pipeline_configured` aplica la configuración real después de ocultar la observación. Las alternativas con nombre propio son comparaciones diagnósticas: no todas siguen del mismo modo los interruptores/límites del cálculo desplegado.
+`pipeline_configured` aplica la configuración real, incluida shape activa, después de ocultar la observación y sus alias. Las alternativas con nombre propio son comparaciones diagnósticas: no todas siguen del mismo modo los interruptores/límites del cálculo desplegado.
 
 `backtest_report.csv` agrupa por `unit`, `method`, `group`; `group=ALL` reúne los grupos de contratos dentro de la misma unidad. Las métricas absolutas mantienen esa unidad.
 
@@ -298,3 +298,101 @@ Las claves de `base_configuration` son `base_dir`, `vwap_input`, `mapping_file`,
 Son datos explícitamente simulados, nunca operaciones reales. `synthetic_vwaps.csv` contiene `reference_date`, `weekday`, `product`, `country`, `region`, `classification`, `unit`, `periodicity_2`, `tenor2`, `vwap`, `total_volume`, `n_trades`. Sus significados coinciden con el diccionario de entrada anterior, pero se generan precios, volúmenes, operaciones y disponibilidad de observaciones. `reference_date` usa día/mes/año, `country` usa el área mapeada y classification es `<profile> load`.
 
 `synthetic_truth.csv` contiene `date` (fecha de referencia), `product`, `region`, `unit`, `tenor`, `period`, `delivery_start`, `delivery_end`, `truth` (precio completo simulado) y `eex` (precio EEX usado para generarlo). Los alias del mismo periodo comparten una sola verdad. Ambos precios usan la unidad de la curva.
+
+<a id="shape-output"></a>
+
+## Shape activa: 11 columnas adicionales del motor
+
+Con `shape.mode=off` se conserva el esquema anterior de 33 columnas. Audit/adjust añaden
+estas 11 (44 columnas del motor en total). En el enriquecido todas llevan prefijo `curve_`,
+incluidas `curve_data_origin_before_shape` y `curve_estimation_method_before_shape`.
+Una fila sin punto correspondiente del motor puede tener trazas vacías. Shape activa puede
+incorporar etiquetas propias Month/Quarter/Year completas fuera de los objetivos para el
+contexto del día; no inventa precios ausentes.
+
+| Columna del motor | Significado |
+|---|---|
+| `price_before_shape` | Precio previo del motor; vacío en missing. En un original físico válido, `curve_price_before_shape` es su VWAP numérico individual, no el agregado del periodo. |
+| `source_before_shape` | Procedencia previa. Enriquecido: `own` para cada original válido. |
+| `estimation_method_before_shape` | Método previo. Enriquecido: `none` para cada original válido. |
+| `data_origin_before_shape` | Origen previo. Enriquecido: `original` para cada original válido. |
+| `shape_mode` | `audit` o `adjust` de esta ejecución. |
+| `shape_status` | Estado descrito debajo. Un residuo no implica por sí solo fallo. |
+| `shape_adjustment` | Cambio realmente aplicado, en `unit`. Cero en audit y filas sin cambio/con fallo. |
+| `shape_proposed_price` | Precio propuesto validado, también en audit. Missing sigue vacío; una propuesta fallida vuelve al precio previo. En originales físicos: VWAP de la fila más delta propuesto de su periodo. |
+| `shape_proposed_adjustment` | Propuesta menos precio previo; cero si no se propone movimiento válido. |
+| `shape_original_modified` | True solo si un nodo original del motor cambia realmente en adjust. No significa sobrescritura del input; un alias añadido puede heredar esta traza del periodo. False en audit. |
+| `shape_trace` | JSON de toda la resolución fecha/curva. Compartido entre sus filas, no evidencia independiente por fila. |
+
+Los nodos propios cambiados tienen `source=own+shape`, `data_origin=estimated` y
+`estimation_method=shape_adjusted_original`. En estimados cambiados se añade `+shape`
+a source y método: por ejemplo `eex+local+shape` / `ratio_local+shape`.
+Su confidence queda vacío. Las filas sin cambio y audit conservan procedencia/confidence
+finales. Basis, anclas y respaldo explican `price_before_shape`; tras un cambio no bastan
+para reconstruir `price`.
+
+El `vwap` original bruto nunca cambia. Si dos duplicados físicos valen 118 y 122 y se acepta
+un delta agregado +2, sus curve_price serán 120 y 124 y sus precios previos 118 y 122.
+El JSON sigue describiendo el nodo agregado común. Audit aplica la misma regla a propuestas.
+
+### Estados shape
+
+| `shape_status` | Significado |
+|---|---|
+| `missing` | No había precio finito; esta capa no lo crea. |
+| `out_of_scope` | Tipo fuera de Month/Quarter/Year completos. |
+| `incomplete_period` | Periodo completo inválido/horas no positivas, o agregado sin los meses necesarios para coherencia activa. |
+| `missing_reference` | Mes sin término aplicable y sin referencia EEX utilizable. No impide una restricción de agregado completo sin EEX. |
+| `no_constraints` | Nodo sin término aplicable activado; incluye meses consecutivos ausentes o publicaciones incompatibles. |
+| `original_preserved` | Nodo original participante fijado por `adjust_originals=false`. |
+| `unchanged` | Resolución válida sin movimiento material del nodo. |
+| `audit_proposed` | Propuesta válida distinta del previo; audit conserva precio final. |
+| `adjusted` | Ajuste válido aplicado. |
+| `solver_failed` | Fallo numérico/de convergencia/validación; conserva precios previos. |
+| `alias_conflict` | Alias elegibles discrepan en precio u horas; se rechaza la resolución de la curva y se conservan precios. |
+
+Los estados tienen prioridad por rama: un original fijo sin término aplicable puede indicar
+`no_constraints`, no `original_preserved`. Filas missing/fuera de alcance pueden compartir
+el trace del grupo.
+
+### Diccionario JSON de shape
+
+Lee `shape_trace` / `curve_shape_trace` con `json.loads`. Algunas trazas de fallo o sin
+términos omiten campos que no llegaron a calcularse; `null` indica no disponible.
+
+| Clave JSON | Significado |
+|---|---|
+| `parameters` | Siete controles efectivos, incluidas opciones de esta ejecución. |
+| `reference`, `reference_description` | `eex_settle`: EEX admitido actual, no el respaldo temporal. |
+| `original_policy` | `fixed` o `movable_with_penalty`. |
+| `smoothness_grid` | Tres meses naturales consecutivos, índice mensual uniforme. |
+| `nodes[]` | Un registro por periodo absoluto elegible deduplicado. |
+| `nodes[].period` | `Kind:delivery_start/delivery_end`, fin exclusivo. |
+| `nodes[].price_before, price_proposed, eex_reference` | Precios/referencia del nodo agregado; pueden diferir de una fila física duplicada. |
+| `nodes[].original, alias_count, bound_hit` | Si algún alias es propio, número de alias del motor y si el cambio propuesto toca el límite. |
+| `constraints[]` | Penalizaciones activadas aplicables, no igualdades exactas garantizadas. |
+| `constraints[].type` | `basis_second_difference` o `month_aggregate`. |
+| `constraints[].coefficients` | Mapa periodo→coeficiente: `1,-2,1` en forma; horas mensuales normalizadas positivas y padre `-1` en agregación. |
+| `constraints[].weight` | Peso configurado sin normalizar. |
+| `constraints[].residual_before, residual_after` | Residuo en unidad de precio previo y después de la propuesta validada; en audit “after” es propuesto. En agregación, signo promedio mensual menos padre. |
+| `solver.method` | `bounded_coordinate_descent` cuando se ejecuta el solver. |
+| `solver.converged, iterations, kkt_residual` | Diagnóstico de aceptación/convergencia en el problema escalado. No es confianza predictiva. |
+| `solver.reason` | Motivo cuando faltan términos o falla, por ejemplo alias contradictorios o validación numérica. |
+| `objective_before, objective_after` | Pérdida conjunta en unidades normalizadas, cuando se calcula. |
+| `objective_price_scale, objective_weight_scale, objective_units` | Se divide la pérdida por escala de precio al cuadrado y escala de pesos; sirven para reconstruirla, no son una métrica monetaria de error. |
+
+Con shape activa, consistencia añade `shape_stage`: `before` (previo), `after` (publicado)
+y también `proposed` en audit. En audit, precios before/after coinciden. El informe mantiene
+sus comparaciones Quarter/meses, Season/trimestres y Year/trimestres. La penalización interna
+Year/meses de shape está en `shape_trace` y no tiene por qué coincidir con esa comparación.
+
+Las predicciones `pipeline_configured` incluyen shape tras ocultar el periodo evaluado.
+Los diagnósticos `local_*`/`hist_*` no necesariamente la incluyen. Tune no añade dimensiones
+de shape: guarda sus valores fijos en el snapshot. [SHAPE.es.md](SHAPE.es.md) detalla reglas
+y controles.
+
+### Diagnóstico de tolerancia agregada
+
+`shape.coherence_tolerance` empieza en 0.01 en la unidad de la fila y solo cambia diagnósticos. Los agregados de `shape_trace.constraints` añaden los booleanos `within_tolerance_before` y `within_tolerance_after`. La traza añade `coherence_within_tolerance_before` y `coherence_within_tolerance_after`: booleanos para todos los agregados aplicables o null si no hay ninguno. En audit, “after” es la propuesta. Los flags `shape_coherence_outside_tolerance` (adjust) y `shape_proposal_outside_coherence_tolerance` (audit) señalan nodos de una relación fuera del margen. Estar fuera puede ser una solución válida con límites y penalizaciones suaves; no garantiza igualdad exacta ni aproximada.
+
+La comparación usa `abs(residual) <= coherence_tolerance + 1e-10` para admitir redondeo numérico.

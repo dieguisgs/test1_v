@@ -1,6 +1,6 @@
 # Output dictionary
 
-Spanish version: [OUTPUT.es.md](OUTPUT.es.md). Calculation rules: [ALGORITHM.md](ALGORITHM.md).
+Spanish version: [OUTPUT.es.md](OUTPUT.es.md). Calculation rules: [ALGORITHM.md](ALGORITHM.md). Optional final layer: [SHAPE.md](SHAPE.md).
 
 All curve keys use **reference date + product + region + unit + tenor label**. A blank region or unit is a literal identity value. Prices and absolute errors use the row's `unit`; currencies are not converted. CSV files use UTF-8 with BOM, comma separators and a header. Empty numeric/date cells mean unavailable or not applicable, not zero. Zero and negative prices are valid finite values.
 
@@ -48,19 +48,19 @@ Input names `data_origin`, `estimation_method` and names starting with `curve_` 
 
 | Column | Type and values | Meaning |
 |---|---|---|
-| `data_origin` | Text: `original`, `estimated`, `missing` | Origin of the usable `curve_price`. A finite original VWAP always remains `original`, including zero or negative values. An invalid original row can have an estimated price in `curve_price`. |
-| `estimation_method` | Text; method rules below | `none` on every valid original row and every unavailable enriched price; otherwise the method used to supply that price. |
+| `data_origin` | Text: `original`, `estimated`, `missing` | Origin of the usable `curve_price`. A finite original remains `original` unless shape explicitly changes its usable price, in which case it becomes `estimated`; its raw VWAP is still retained, including zero/negative values. An invalid original row can have an estimated price in `curve_price`. |
+| `estimation_method` | Text; method rules below | `none` on every unchanged valid original and every unavailable enriched price; `shape_adjusted_original` on an original price changed by shape; otherwise the method used to supply that price. |
 | `curve_reference_date` | ISO date | Parsed reference date, independent of the original date's formatting. |
 | `curve_product`, `curve_region`, `curve_unit` | Text | Normalized curve identity. |
 | `curve_tenor` | Text | Original label for an original row; target label for an added row. |
 | `curve_price` | Number or empty | Usable original, estimated or missing price. Use this field when the original VWAP column contains invalid text. |
-| `curve_source` | Engine source enum below | `own` for a valid original row, even when the engine did not calculate that row. Otherwise the engine source, or `missing`. |
+| `curve_source` | Engine source enum below | `own` for an unchanged valid original row, even without an engine calculation; `own+shape` when its curve price was adjusted. Otherwise the engine source, or `missing`. |
 | `curve_row_type` | Text: `original`, `original_invalid`, `added` | Whether the physical row already existed, contained an unusable VWAP, or was appended. Independent of price origin. |
 | `curve_flags` | Semicolon-separated text or empty | Engine flags plus enrichment flags, listed below. |
 
 **Every other engine column in the next section is copied with `curve_` prefixed**, except `data_origin` and `estimation_method`, which use the enrichment semantics above. Thus the full normal trace also includes `curve_area`, `curve_profile`, `curve_kind`, `curve_period`, `curve_delivery_start`, `curve_delivery_end`, `curve_hours`, `curve_confidence`, `curve_basis_mode`, `curve_configured_basis_mode`, `curve_own_vwap`, `curve_own_volume`, `curve_eex_settle`, `curve_eex_method`, `curve_eex_asof`, `curve_eex_fallback_trace`, `curve_basis`, `curve_basis_local`, `curve_basis_hist`, `curve_cross_adj`, `curve_local_weight`, `curve_anchors`, `curve_cross_from` and **`curve_flag`**. If no engine rows were produced, only the fixed enrichment columns are guaranteed; optional trace columns depend on the engine table supplied.
 
-`curve_flag` is the engine's singular `flag` copied unchanged. `curve_flags` is the combined enrichment field. Do not confuse them. On valid original rows, `curve_price`, `curve_source`, and, when present, `curve_own_vwap`/`curve_own_volume` describe that exact original row. Other trace fields describe the matching engine point and can be empty, or refer to an aggregate of repeated original delivery periods. The presence of an original row does not imply that all diagnostics were computed.
+`curve_flag` is the engine's singular `flag` copied unchanged. `curve_flags` is the combined enrichment field. Do not confuse them. On valid original rows, `curve_price`, `curve_source`, and, when present, `curve_own_vwap`/`curve_own_volume` describe that exact original row. An enabled original shape adjustment changes only the usable curve price and its provenance; raw observations and own diagnostics remain available. Other trace fields describe the matching engine point and can be empty, or refer to an aggregate of repeated original delivery periods. The presence of an original row does not imply that all diagnostics were computed.
 
 Illustrative rows, not actual market observations; all three use the same EUR/MWh curve. Here `tenor2` is the configured tenor column:
 
@@ -72,9 +72,9 @@ Illustrative rows, not actual market observations; all three use the same EUR/MW
 
 The third row also receives `original_vwap_missing_or_invalid`. If a price were available for it, its original `vwap` would still read `invalid`; `curve_price` would hold the estimate and `data_origin` would become `estimated`.
 
-## Filled output: all 33 engine columns
+## Filled output: 33 base engine columns
 
-These fields are written to `filled_history.csv` and daily filled files. There is one row per resolvable configured target label and active `fill` curve/date. An unresolvable target produces no row. Different labels can resolve to the same delivery period.
+These fields are written to `filled_history.csv` and daily filled files. There is one row per resolvable configured target label and active `fill` curve/date; active shape also includes observed Month/Quarter/Year labels needed as context. An unresolvable target produces no row. Different labels can resolve to the same delivery period.
 
 | Column | Type / values | Meaning and empty cases |
 |---|---|---|
@@ -91,8 +91,8 @@ These fields are written to `filled_history.csv` and daily filled files. There i
 | `delivery_end` | ISO date | Exclusive delivery end. |
 | `hours` | Number, >=0 | Delivery hours under the mapped profile, timezone and target kind; includes applicable calendar/DST rules. |
 | `price` | Finite number or empty | Engine price in `unit`; empty with `source=missing`. |
-| `source` | Text | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage`, `missing`; see below. |
-| `confidence` | Number, 0..1 | Heuristic diagnostic, **not a probability or calibrated accuracy measure**. Own=1, missing=0, arbitrage=0.4. EEX-based values use 0.4 for smoothed EEX or `0.5+0.4*local_weight`, reduced by 0.85 for a non-exact contract and 0.9 for an earlier settlement; rounded to three decimals. |
+| `source` | Text | `own`, `eex+local`, `eex+hist`, `eex+cross`, `eex+smooth`, `arbitrage`, `missing`; changed shape sources append `+shape` (including `own+shape`); see below. |
+| `confidence` | Number, 0..1, or empty after a shape change | Heuristic diagnostic, **not a probability or calibrated accuracy measure**. Own=1, missing=0, arbitrage=0.4. EEX-based values use 0.4 for smoothed EEX or `0.5+0.4*local_weight`, reduced by 0.85 for a non-exact contract and 0.9 for an earlier settlement; rounded to three decimals. |
 | `data_origin` | Text | `original` for own, `estimated` for a calculated price (including smoothed EEX), `missing` otherwise. |
 | `estimation_method` | Text | `none` for own, `unavailable` for missing, or a calculation method below. |
 | `basis_mode` | Text: `ratio`, `additive` | Effective mode selected for this target. On own/missing/eex+smooth rows it does not mean that an adjustment was applied. |
@@ -110,9 +110,9 @@ These fields are written to `filled_history.csv` and daily filled files. There i
 | `local_weight` | Number, 0..1, or empty | Local weight in the blend; `W/(W+shrink_k)` when local evidence exists, otherwise zero. Empty when no EEX adjustment was calculated. |
 | `anchors` | Comma-separated text or empty | Labels of the **top three anchor entries by local weight**, not every contributing anchor. An entry can itself combine alias labels. No weights or complete lineage are exported here. |
 | `cross_from` | Comma-separated text or empty | Used helper/other curve labels with correlation rounded to two decimals: `product [region='...', unit='...'](0.85)`. Not a table of beta coefficients or weights. |
-| `flag` | Semicolon-separated text or empty | Engine conditions listed below. Own values remain intact even when excluded as anchors. |
+| `flag` | Semicolon-separated text or empty | Engine conditions listed below. Anchor exclusion alone does not change own prices; an explicitly enabled shape stage can. |
 
-For `basis`, `basis_local`, `basis_hist` and `cross_adj`, **ratio values are fractions**: `0.05` means +5%, and `price = eex_settle * (1 + basis)`. Additive values use the price unit: `0.05` means +0.05 EUR/MWh on an EUR/MWh curve, and `price = eex_settle + basis`. Never combine adjustments from different modes as if they shared units. `local_weight` is dimensionless in both modes. Own values need not have populated basis diagnostics.
+For `basis`, `basis_local`, `basis_hist` and `cross_adj`, **ratio values are fractions**: `0.05` means +5%, and `price = eex_settle * (1 + basis)`. Additive values use the price unit: `0.05` means +0.05 EUR/MWh on an EUR/MWh curve, and `price = eex_settle + basis`. Never combine adjustments from different modes as if they shared units. `local_weight` is dimensionless in both modes. Own values need not have populated basis diagnostics. With shape active these formulas describe `price_before_shape`; the final price additionally includes `shape_adjustment`.
 
 ### Smoothed EEX fallback audit JSON
 
@@ -141,7 +141,7 @@ In Python, use `json.loads(cell)` when the cell is nonempty.
 | `spread, weight` | Difference `to_price−from_price` and weight `1/spread_window` |
 
 Audit: sum `price×weight` to reproduce `price_average.value`; in a cascade, sum each link's
-`spread×weight` and check every `price_after`. The last value must equal `price`.
+`spread×weight` and check every `price_after`. The last value must equal `price_before_shape` when shape is active, otherwise `price`.
 Do not reconstruct it with `eex_settle*(1+basis)`: the settlement retains the unsmoothed
 reference and `basis/local_weight` are empty. See section 16 of [ALGORITHM.md](ALGORITHM.md)
 for complete windows, M0/M1, worked examples and limits. Numerical equality with the latest
@@ -171,7 +171,7 @@ For worked examples of the nine cases, see section 0.9 of [ALGORITHM.md](ALGORIT
 - `ratio_` or `additive_`, followed by the available component names in this fixed order: `local`, `history`, `cross`, joined with underscores. For example `additive_local_history` or `ratio_history_cross`. This describes available components in the calculation, not a claim that each numerical contribution is nonzero.
 - `eex_price_simple`, `eex_price_ewma`: direct period average. `eex_month_cascade_simple`, `eex_month_cascade_ewma`: anchor-month average plus simple spreads. The suffix describes price averaging, not spread averaging.
 - `contract_exact`, `contract_strip`, `contract_residual`: final contract reconstruction when `arbitrage` is enabled. `exact` uses the matching period, `strip` combines contiguous periods by delivery hours, and `residual` extracts the tail of a larger contract using the covered head. Components can be own or already estimated prices.
-- Enriched output changes any unavailable method to `none`. A supplied price from `source=own` on an added/invalid original row becomes `own_equivalent_period`; it is marked `estimated` because that physical row did not contain a usable original price. This reuses an equivalent delivery period for the same curve identity and reference date, not yesterday's price; it is not arbitrage and remains available when that layer is off. Every valid original row instead has method `none`.
+- Enriched output changes any unavailable method to `none`. A supplied price from `source=own` on an added/invalid original row becomes `own_equivalent_period`; it is marked `estimated` because that physical row did not contain a usable original price. This reuses an equivalent delivery period for the same curve identity and reference date, not yesterday's price; it is not arbitrage and remains available when that layer is off. Every unchanged valid original row has method `none`; shape-adjusted originals have `shape_adjusted_original`.
 
 ### Flags
 
@@ -198,7 +198,7 @@ Auto rationale flags are emitted when an EEX-based estimate takes that branch, n
 
 ## Consistency output
 
-`consistency_history.csv` contains only available comparisons: Quarter against months, Season against quarters, Year against quarters. No row means no such comparison was produced, not proof of consistency. Prices are reported, not forced into agreement.
+`consistency_history.csv` contains only available comparisons: Quarter against months, Season against quarters, Year against quarters. No row means no such comparison was produced, not proof of consistency. Shape-off prices are reported without reconciliation. Active shape applies soft aggregate penalties and adds stages; equality is not guaranteed.
 
 | Columns | Meaning |
 |---|---|
@@ -225,7 +225,7 @@ Auto rationale flags are emitted when an EEX-based estimate takes that branch, n
 | `pred` | Predicted price in `unit`. |
 | `error` | `pred - own`; positive means overprediction. |
 
-`pipeline_configured` applies the actual configuration after hiding the observation. The named alternatives are diagnostic comparisons and are not all constrained by the deployed layer switches/guards in the same way.
+`pipeline_configured` applies the actual configuration, including active shape, after hiding the observation and its aliases. The named alternatives are diagnostic comparisons and are not all constrained by the deployed layer switches/guards in the same way.
 
 `backtest_report.csv` groups by `unit`, `method`, `group`; `group=ALL` combines contract groups within that same unit. Every absolute metric remains in its group's unit.
 
@@ -298,3 +298,103 @@ All `metadata` keys:
 These files are explicitly simulated data, never real transactions. `synthetic_vwaps.csv` contains `reference_date`, `weekday`, `product`, `country`, `region`, `classification`, `unit`, `periodicity_2`, `tenor2`, `vwap`, `total_volume`, `n_trades`. Their meanings match the input dictionary above, but prices, volumes, trades and observation availability are generated. `reference_date` uses day/month/year, `country` uses mapped area, and classification is `<profile> load`.
 
 `synthetic_truth.csv` contains `date` (reference date), `product`, `region`, `unit`, `tenor`, `period`, `delivery_start`, `delivery_end`, `truth` (simulated complete price) and `eex` (EEX price used to generate it). Aliases for the same delivery period share one truth. Both prices use the stated curve unit.
+
+<a id="shape-output"></a>
+
+## Active shape output: 11 additional engine columns
+
+With `shape.mode=off`, the engine retains the 33-column schema above. Audit/adjust add the
+following 11 fields (44 engine columns in total). In enriched output every one is prefixed
+with `curve_`, including `curve_data_origin_before_shape` and
+`curve_estimation_method_before_shape`. Rows without a matching engine point can have empty
+trace fields. Active shape can add observed full Month/Quarter/Year labels outside the target
+list as same-day context; it does not invent missing prices.
+
+| Engine column | Meaning |
+|---|---|
+| `price_before_shape` | Pre-layer engine price; empty for missing. On a valid physical original row, `curve_price_before_shape` is that row's own raw numeric VWAP, not its period aggregate. |
+| `source_before_shape` | Source of the pre-layer calculation. Enriched valid original rows use `own`. |
+| `estimation_method_before_shape` | Method of the pre-layer calculation. Enriched valid originals use `none`. |
+| `data_origin_before_shape` | Pre-layer origin. Enriched valid originals use `original`. |
+| `shape_mode` | `audit` or `adjust` for this calculation. |
+| `shape_status` | Outcome enum below. A residual does not by itself imply failure. |
+| `shape_adjustment` | Actual applied price change, in `unit`. Zero in audit and on unchanged/failed rows. |
+| `shape_proposed_price` | Validated proposed price, even in audit. Missing stays empty; failed proposals revert to the pre-layer price. On an original physical row, raw VWAP plus its period's proposed delta. |
+| `shape_proposed_adjustment` | Proposed minus pre-layer price; zero where no valid movement is proposed. |
+| `shape_original_modified` | True only when an original engine node actually changes in adjust mode. Not an indication that the input cell was overwritten; an added alias can inherit this period-level trace. False in audit. |
+| `shape_trace` | JSON with the entire same-date/curve solve. Shared by the group's rows, not separate independent evidence for each row. |
+
+Changed own nodes have `source=own+shape`, `data_origin=estimated` and
+`estimation_method=shape_adjusted_original`. Changed estimates append `+shape` to source
+and estimation method, for example `eex+local+shape` / `ratio_local+shape`.
+Their confidence is empty. Unchanged and audit rows retain final provenance and confidence.
+Pre-existing basis, anchor and fallback fields explain `price_before_shape`; after a change
+they cannot alone reconstruct `price`.
+
+Raw original `vwap` remains untouched even when original adjustment is enabled. For duplicate
+input rows with values 118 and 122, an accepted aggregate delta +2 produces final curve prices
+120 and 124; before-values remain 118 and 122. The JSON still describes the common aggregate
+node. Proposed changes use the same per-row rule in audit.
+
+### Shape status values
+
+| `shape_status` | Meaning |
+|---|---|
+| `missing` | No finite price existed; the layer does not supply one. |
+| `out_of_scope` | Kind is outside full Month/Quarter/Year. |
+| `incomplete_period` | Invalid full period/nonpositive hours, or an aggregate lacks required monthly nodes for an enabled coherence term. |
+| `missing_reference` | An uninvolved Month lacks a usable matching EEX reference. This does not prohibit a complete aggregate constraint without EEX. |
+| `no_constraints` | Node participates in no enabled applicable term; includes absent consecutive months or incompatible publication dates. |
+| `original_preserved` | Original node participates, but is fixed by `adjust_originals=false`. |
+| `unchanged` | Valid solve with no material movement for this node. |
+| `audit_proposed` | Valid nonzero proposal; final price remains unchanged in audit. |
+| `adjusted` | Valid nonzero adjustment was applied. |
+| `solver_failed` | Numerical/convergence/validation failure; pre-layer prices retained. |
+| `alias_conflict` | Eligible aliases disagree on price or hours; the curve solve is rejected and prices retained. |
+
+These statuses have branch precedence: a fixed original with no applicable term can be
+`no_constraints`, not `original_preserved`. Out-of-scope/missing rows can still carry the
+group's trace.
+
+### Shape JSON dictionary
+
+Read `shape_trace` / `curve_shape_trace` with `json.loads`. Some failure/no-constraint traces
+omit fields that were never calculated; JSON `null` means unavailable.
+
+| JSON key | Meaning |
+|---|---|
+| `parameters` | Seven effective shape controls, including this command's overrides. |
+| `reference`, `reference_description` | `eex_settle`: current accepted EEX, not temporal fallback. |
+| `original_policy` | `fixed` or `movable_with_penalty`. |
+| `smoothness_grid` | Three consecutive calendar months on a uniform month index. |
+| `nodes[]` | One record per eligible deduplicated absolute period. |
+| `nodes[].period` | `Kind:delivery_start/delivery_end`, exclusive end. |
+| `nodes[].price_before, price_proposed, eex_reference` | Aggregate node prices/reference; can differ from an individual duplicate input row. |
+| `nodes[].original, alias_count, bound_hit` | Whether any alias is own; count of engine aliases; whether the proposed movement reaches the box limit. |
+| `constraints[]` | Enabled, applicable penalty terms, not claims of exact equalities. |
+| `constraints[].type` | `basis_second_difference` or `month_aggregate`. |
+| `constraints[].coefficients` | Map of absolute node labels to coefficients: `1,-2,1` for smoothness; positive normalized month hours and parent `-1` for aggregation. |
+| `constraints[].weight` | Unscaled configured smoothness/coherence weight. |
+| `constraints[].residual_before, residual_after` | Price-unit residual before and after the validated proposal; audit's “after” means proposed. Aggregate sign is monthly average minus parent. |
+| `solver.method` | `bounded_coordinate_descent` when a solve runs. |
+| `solver.converged, iterations, kkt_residual` | Acceptance/convergence diagnostics in the internally scaled problem. Not forecast confidence. |
+| `solver.reason` | Present for no applicable terms or failures, such as conflicting aliases or failed numerical validation. |
+| `objective_before, objective_after` | Joint loss values in normalized units, when calculated. |
+| `objective_price_scale, objective_weight_scale, objective_units` | Loss is divided by price scale squared and weight scale; use these to interpret/reconstruct it, not as a monetary error metric. |
+
+When shape is active, consistency files additionally contain `shape_stage`: `before`
+(pre-layer), `after` (published result), plus `proposed` in audit. Before and after prices
+are identical in audit. Existing consistency comparisons remain Quarter/months,
+Season/quarters and Year/quarters; shape's internal Year/months penalty is detailed in
+`shape_trace` and need not be identical to that report's comparison.
+
+`pipeline_configured` backtest predictions include the configured shape layer after hiding
+the held-out period. Diagnostic `local_*`/`hist_*` branches need not include it.
+Tune does not add shape grid dimensions; it stores the fixed shape configuration in its
+snapshot. Full behavior and controls: [SHAPE.md](SHAPE.md).
+
+### Aggregate tolerance diagnostics
+
+`shape.coherence_tolerance` defaults to 0.01 in the row's price unit and changes diagnostics only. Aggregate entries in `shape_trace.constraints` add `within_tolerance_before` and `within_tolerance_after` booleans. The trace adds `coherence_within_tolerance_before` and `coherence_within_tolerance_after`, booleans across applicable aggregates or null when none exist. In audit, “after” refers to the proposal. The flags `shape_coherence_outside_tolerance` (adjust) and `shape_proposal_outside_coherence_tolerance` (audit) identify nodes in a relation outside the margin. An outside-tolerance result can be a valid bounded soft-penalty solution; no guarantee of exact or near equality is implied.
+
+The comparison uses `abs(residual) <= coherence_tolerance + 1e-10` to allow numerical rounding.
