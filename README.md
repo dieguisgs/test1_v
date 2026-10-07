@@ -665,7 +665,7 @@ does not establish performance when an entire daily curve is missing, or reveal 
 actual unobserved gaps. Do not repeatedly tune against the same reserved period and then
 present it as independent evidence. Reserve fresh dates for later changes.
 
-Missing, nonnumeric or nonfinite EEX settlements are excluded with a warning while valid quotes remain. A nonfinite calculated price fails the run and prevents result writes.
+Missing, nonnumeric or nonfinite EEX settlements are excluded with a warning while valid quotes remain. A present corrupt file or a nonempty EEX source with no usable settlements aborts publication. A nonfinite calculated price also fails the run. Absent files and valid header-only datasets retain the documented no-EEX behavior; rerunning with less evidence can replace earlier estimates.
 
 <a id="shape-layer"></a>
 
@@ -750,3 +750,15 @@ when there is no applicable aggregate. The same numeric setting is interpreted i
 curve's own unit; it is not a percentage or a currency conversion.
 
 This hours-based layer is specific to the supported power contracts. It must not be transferred to agricultural or other asset curves without validating their delivery definitions; see [scope and the observed EEX sample](SHAPE.md#why-this-is-power-specific-and-what-the-eex-sample-showed).
+
+## Code review and reliable execution
+
+[CODE_REVIEW.md](CODE_REVIEW.md) records reproduced defects, fixes, checks and remaining limits.
+Alias aggregation, validation, output protection and scoring have been strengthened.
+[Algorithm section 18](ALGORITHM.md#18-determinism-and-operational-integrity) explains the
+current operational rules. Passing tests does not demonstrate accuracy on real missing prices.
+
+The notebook starts in **Curva completa**, showing every saved contract for the selected curve
+and date. To recreate the nine-family example on this or another computer, run
+`uv run python examples/generate_notebook_demo.py`, restart the kernel and execute every cell.
+The generated CSV is synthetic and is not published in GitHub.

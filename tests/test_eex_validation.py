@@ -79,16 +79,22 @@ def test_invalid_duplicate_and_later_fixing_do_not_overwrite_valid_prices(eex_lo
     assert len(eex_logs.records) == 1 and "excluded 2" in eex_logs.text
 
 
-def test_all_invalid_file_returns_empty_book_and_logs_once(tmp_path, eex_logs):
+def test_nonempty_all_invalid_file_is_rejected_and_logs_once(tmp_path, eex_logs):
     path = tmp_path / "invalid.csv"
     pd.DataFrame([
         (DAY, "Month", date(2026, 10, 1), "inf"),
         (DAY, "Month", date(2026, 11, 1), "bad"),
     ], columns=REQUIRED).to_csv(path, index=False)
-    book = EexBook.from_file(path)
-    assert book.trade_dates == []
-    assert book.quotes(DAY, None) == ({}, None)
+    with pytest.raises(ValueError, match="no finite settlement prices"):
+        EexBook.from_file(path)
     assert len(eex_logs.records) == 1 and "excluded 2" in eex_logs.text
+
+
+def test_nonempty_file_without_supported_contracts_is_rejected(tmp_path):
+    path = tmp_path / "unsupported.csv"
+    pd.DataFrame([(DAY, "unsupported", date(2026, 10, 1), 100)], columns=REQUIRED).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="no supported delivery contracts"):
+        EexBook.from_file(path)
 
 
 def test_empty_file_with_required_headers_is_supported(tmp_path, eex_logs):
@@ -122,3 +128,26 @@ def test_infinite_eex_target_becomes_missing_without_poisoning_finite_curve_poin
     assert curve.loc["M+3", "data_origin"] == "estimated"
     available = result.filled[result.filled["source"] != "missing"]
     assert available["price"].map(math.isfinite).all()
+
+
+@pytest.mark.parametrize("prices", [[100.0, 999.0], [999.0, 100.0]])
+def test_conflicting_finite_duplicates_are_rejected_independently_of_row_order(prices):
+    frame = pd.DataFrame([(DAY, "Month", date(2026, 10, 1), price) for price in prices], columns=REQUIRED)
+    with pytest.raises(ValueError, match="Conflicting EEX settlements"):
+        EexBook(frame)
+
+
+def test_identical_finite_eex_duplicates_are_harmless():
+    row = (DAY, "Month", date(2026, 10, 1), 100.0)
+    book = EexBook(pd.DataFrame([row, row], columns=REQUIRED))
+    assert list(book.quotes(DAY, None)[0].values()) == [100.0]
+
+
+@pytest.mark.parametrize("column", ["tradeDate", "deliveryStart"])
+def test_ambiguous_numeric_eex_dates_are_rejected(tmp_path, column):
+    frame = pd.DataFrame([(DAY, "Month", date(2026, 10, 1), 100.0)], columns=REQUIRED)
+    frame[column] = 45931
+    path = tmp_path / "numeric-date.csv"
+    frame.to_csv(path, index=False)
+    with pytest.raises(ValueError, match=f"invalid {column} dates"):
+        EexBook.from_file(path)

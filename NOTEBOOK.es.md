@@ -70,6 +70,11 @@ La celda de rutas está preparada para la prueba local con
 GitHub**. En otro ordenador debes sustituir `OUTPUT_PATH` por el CSV que hayas generado
 o copiado. La propia celda contiene ejemplos comentados para ambas situaciones.
 
+Para crear ese ejemplo en cualquier ordenador, desde la raíz ejecuta
+`uv run python examples/generate_notebook_demo.py`. Genera datos sintéticos con las familias
+Day, Weekend, BOW, Week, BOM, Month, Quarter, Season y Year; no necesita inputs reales ni EEX.
+El script es independiente del notebook y guarda su CSV en la ruta de prueba anterior.
+
 Si hace falta, edita la primera celda de código:
 
 ```python
@@ -97,19 +102,35 @@ proceso lo está escribiendo durante la consulta.
 
 ## Tres vistas distintas
 
-**Una fecha.** Selecciona la identidad completa `(product, region, unit)`, el tipo de contrato
-y la fecha de referencia. Se inicia en Month si existe; también admite Day y los demás tipos
-guardados. Compara el `price` final con `eex_settle`. Opcionalmente muestra marcadores de
+**Una fecha.** Selecciona la identidad completa `(product, region, unit)` y la fecha de referencia.
+La selección inicial es **Curva completa (todos los tipos)**: muestra juntos todos los contratos
+guardados para esa curva y fecha. El selector **Vista** permite limitarse a Month, Quarter,
+Year o cualquier otro tipo presente en el CSV, conservando todos sus vencimientos. No hay
+un límite de dos trimestres ni de seis meses. Compara el `price` final con `eex_settle`.
+Opcionalmente muestra marcadores de
 `own_vwap` y la línea `price_before_shape`. La tabla incluye origen, flags, `eex_asof`,
 antigüedad de EEX y estado de shape cuando estén disponibles.
 
-Con todos los tipos seleccionados se muestran solo marcadores: nunca se unen meses y medias
-trimestrales en una misma línea. El fin del intervalo de entrega es exclusivo.
+El eje horizontal muestra contratos (`D+1`, `M+1`, `Q+1`, `Cal+1`, etc.), agrupados por tipo y
+ordenados por entrega. Cada contrato tiene su propia posición, incluso si un mes, trimestre
+y año empiezan el mismo día. La separación entre puntos es uniforme: **no representa duración
+ni distancia temporal**. Las fechas exactas aparecen al pasar el cursor; el fin es exclusivo.
+Las líneas conectan puntos dentro de cada tipo y se interrumpen entre tipos, señalados por
+separadores verticales. La leyenda permite ocultar/mostrar cada serie para todos los tipos.
+
+El texto sobre el gráfico cuenta los contratos de cada familia. Se muestran todas las filas
+guardadas, incluidos huecos sin precio; no se inventan Q+3 o Cal+1 si no están en el CSV.
+El ejemplo anterior tenía únicamente seis meses y dos trimestres; el ejemplo ampliado incluye
+las nueve familias. Tras regenerar un CSV o actualizar el notebook, reinicia el kernel y ejecuta
+todas las celdas para recargar los datos y las funciones.
 
 **Medias por rango.** Elige fechas inicial/final inclusivas, alineación y pulsa **Comparar
 rango**. Por defecto se sigue la misma entrega absoluta aunque cambie su etiqueta. La
 alineación por tenor relativo mezcla entregas intencionadamente: M+1 en septiembre y M+1 en
 octubre son contratos distintos. Se muestra un aviso y el contador `n_delivery_periods`.
+Esta pestaña también respeta **Vista**: curva completa o todos los vencimientos de un tipo.
+El eje separa cada contrato; en alineación absoluta usa etiquetas de entrega y en relativa,
+etiquetas de tenor. Las líneas siguen separadas por tipo.
 
 Para cada punto, ambas medias usan **solo fechas de referencia con precio final y EEX finitos**.
 Cada fecha emparejada pesa lo mismo: no se pondera por volumen ni horas de entrega. Un precio
@@ -160,5 +181,5 @@ Si aparecen textos pero no selectores/gráficos, comprueba que instalaste el gru
 seleccionaste el kernel de ese entorno. Las pruebas de los helpers no requieren Jupyter.
 
 Comprobación de ejecución: todas las celdas y callbacks interactivos funcionaron sin errores
-con output sintético de 168 filas, siete fechas y tres identidades, incluidas medias de rango
-con alineación por periodo absoluto y por etiqueta relativa.
+con output sintético de siete fechas, tres identidades y las nueve familias admitidas, incluidas
+la curva completa y las medias con alineación por periodo absoluto y por etiqueta relativa.

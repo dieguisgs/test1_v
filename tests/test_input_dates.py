@@ -85,3 +85,15 @@ def test_catchup_iso_input_starts_in_september_and_preserves_own_price(cfg):
     assert filled.price.tolist() == [100.0]
     assert enriched.reference_date.tolist() == ["2026-09-01"]
     assert enriched.curve_reference_date.tolist() == ["2026-09-01"]
+
+
+@pytest.mark.parametrize("value", [45931, 45931.0, 20260928, "20260928",
+                                  "2026-10-07T12:00:00+02:00", "2026-10-07T10:00:00Z"])
+def test_ambiguous_numeric_or_timezone_dates_are_invalid_instead_of_becoming_1970(cfg, value):
+    raw = original([value])
+    path = cfg.base_dir / "ambiguous.xlsx"
+    raw.to_excel(path, index=False)
+    with pytest.raises(ValueError, match="invalid|empty"):
+        load_input(path, cfg)
+    with pytest.raises(ValueError, match="invalid|empty"):
+        enrich_input(raw, pd.DataFrame(), cfg, [], date(1969, 1, 1), date(2027, 12, 31))

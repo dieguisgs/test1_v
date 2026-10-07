@@ -118,7 +118,12 @@ class Pricer:
                 continue
             w = self._weighted(head, hours)
             if w is None:
-                continue
+                # A fully covered head containing only non-delivery days has
+                # zero energy. The tail retains the entire parent's value.
+                # Missing positive-hour evidence must still remain unpriced.
+                if hours(s0, s) != 0:
+                    continue
+                w = (0.0, 0.0)
             ph, hh = w
             h_total = hours(s0, e)
             h_tail = h_total - hh

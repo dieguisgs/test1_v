@@ -23,6 +23,7 @@ from vwaps.identity import CurveKey, IDENTITY_COLUMNS, curve_keys, normalize_ide
 from vwaps.log import get_logger, setup_logging
 from vwaps.mapping import (COLUMNS, ProductMap, check_mapping, eex_path, guess_row,
                            load_mapping, migrate_legacy_mapping)
+from vwaps.publication import CsvBatch, publication_lock
 from vwaps.synthetic import make_synthetic
 from vwaps.tenors import parse_tenor, resolve_tenor
 
@@ -119,9 +120,9 @@ def main(argv: list[str], config_path: Path) -> int:
                            help="nonnegative diagnostic tolerance for aggregate discrepancies in price units")
 
     a = ap.parse_args(argv)
-    cfg = load_config(a.config)
-    setup_logging(cfg.output_dir / "_logs", " ".join(["run.py", *argv]))
     try:
+        cfg = load_config(a.config)
+        setup_logging(cfg.output_dir / "_logs", " ".join(["run.py", *argv]))
         overrides = {name: getattr(a, name) for name in (
             "fallback_price_method", "fallback_price_window", "fallback_ewma_halflife",
             "fallback_spread_window", "fallback_anchor_months",
@@ -141,7 +142,7 @@ def main(argv: list[str], config_path: Path) -> int:
             "make-synthetic": cmd_synthetic,
             "tune": cmd_tune,
         }[a.cmd](cfg, a)
-    except (FileNotFoundError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         get_logger().error(str(exc))
         return 1
 
@@ -185,8 +186,8 @@ def _books(cfg: Config, maps: list[ProductMap]) -> dict[CurveKey, EexBook | None
                                f"(check eex_file in {cfg.mapping_file.name})")
             books[m.key] = None
         except Exception as exc:
-            get_logger().error(f"{m.product}: cannot read {path}: {exc} -> no EEX")
-            books[m.key] = None
+            raise ValueError(f"{m.label}: cannot read EEX file {path}: {exc}. "
+                             "No result files written; repair the input and retry.") from exc
         cache[path] = books[m.key]
     return books
 
@@ -209,7 +210,8 @@ def _load(cfg: Config, override: str | None):
     return vw, raw, maps, _books(cfg, maps)
 
 
-def _upsert(path: Path, new: pd.DataFrame, replaced_groups: pd.DataFrame | None = None) -> None:
+def _upsert(path: Path, new: pd.DataFrame, replaced_groups: pd.DataFrame | None = None,
+            *, batch: CsvBatch | None = None) -> None:
     if new.empty and (replaced_groups is None or replaced_groups.empty):
         return
     if new.empty and not path.exists():
@@ -223,9 +225,12 @@ def _upsert(path: Path, new: pd.DataFrame, replaced_groups: pd.DataFrame | None 
             done = set(map(tuple, replaced.drop_duplicates().to_numpy()))
             old = old.loc[[tuple(r) not in done for r in old[KEYS].to_numpy()]]
             new = pd.concat([old, new], ignore_index=True) if not new.empty else old
-    path.parent.mkdir(parents=True, exist_ok=True)
-    new.sort_values(KEYS + ["delivery_start"] if "delivery_start" in new else KEYS).to_csv(
-        path, index=False, encoding="utf-8-sig")
+    new = new.sort_values(KEYS + ["delivery_start"] if "delivery_start" in new else KEYS)
+    if batch is None:
+        with CsvBatch() as standalone:
+            standalone.stage(path, new)
+    else:
+        batch.stage(path, new)
 
 
 def _require_complete(res) -> None:
@@ -235,7 +240,7 @@ def _require_complete(res) -> None:
                          "No results written; check the log and run again.")
 
 
-def _merge_enriched(path: Path, new: pd.DataFrame) -> None:
+def _merge_enriched(path: Path, new: pd.DataFrame, *, batch: CsvBatch | None = None) -> None:
     """Replace date/curve groups without aggregating or sorting original rows."""
     keys = ENRICHED_KEYS
     if path.exists():
@@ -247,8 +252,11 @@ def _merge_enriched(path: Path, new: pd.DataFrame) -> None:
         done = set(map(tuple, new[keys].drop_duplicates().to_numpy()))
         old = old[[tuple(row) not in done for row in old[keys].to_numpy()]]
         new = pd.concat([old, new], ignore_index=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    new.to_csv(path, index=False, encoding="utf-8-sig")
+    if batch is None:
+        with CsvBatch() as standalone:
+            standalone.stage(path, new)
+    else:
+        batch.stage(path, new)
 
 
 def _validate_output_schema(path: Path, keys: list[str]) -> None:
@@ -265,6 +273,12 @@ def _validate_output_schema(path: Path, keys: list[str]) -> None:
 
 def _write(cfg: Config, res, enriched: pd.DataFrame) -> None:
     _require_complete(res)
+    with publication_lock(cfg.output_dir), CsvBatch() as batch:
+        _stage_outputs(cfg, res, enriched, batch)
+
+
+def _stage_outputs(cfg: Config, res, enriched: pd.DataFrame, batch: CsvBatch) -> None:
+    """Read and merge every affected output while holding the writer lock."""
     out = cfg.output_dir
     for name in ("filled_history.csv", "consistency_history.csv"):
         _validate_output_schema(out / name, KEYS)
@@ -284,14 +298,14 @@ def _write(cfg: Config, res, enriched: pd.DataFrame) -> None:
             if "product" in old.columns:
                 old = old[~curve_keys(old).isin(set(curve_keys(g)))]
                 g = pd.concat([old, g], ignore_index=True)
-        g.to_csv(f, index=False, encoding="utf-8-sig")
-    _upsert(out / "filled_history.csv", res.filled)
+        batch.stage(f, g)
+    _upsert(out / "filled_history.csv", res.filled, batch=batch)
     recalculated = res.filled[KEYS] if not res.filled.empty else None
-    _upsert(out / "consistency_history.csv", res.consistency, recalculated)
+    _upsert(out / "consistency_history.csv", res.consistency, recalculated, batch=batch)
     if not enriched.empty:
         for day, g in enriched.groupby("curve_reference_date", sort=False):
-            _merge_enriched(out / "enriched" / f"{day}.csv", g)
-        _merge_enriched(out / "enriched_history.csv", enriched)
+            _merge_enriched(out / "enriched" / f"{day}.csv", g, batch=batch)
+        _merge_enriched(out / "enriched_history.csv", enriched, batch=batch)
 
 
 def _print_summary(filled: pd.DataFrame) -> None:
@@ -346,7 +360,8 @@ def cmd_mapping(cfg: Config, a) -> int:
             guess_row(p, cfg, region=r, unit=u) for p, r, u in new])], ignore_index=True)
     if new or migrated:
         path.parent.mkdir(parents=True, exist_ok=True)
-        cur[COLUMNS].to_csv(path, index=False, encoding="utf-8-sig")
+        with CsvBatch() as batch:
+            batch.stage(path, cur[COLUMNS])
         _out(f"{len(new)} new curves added to {path} (draft: review these entries)"
              + ("; legacy mapping migrated to product/region/unit" if migrated else ""))
     else:
@@ -380,7 +395,9 @@ def cmd_refill(cfg: Config, a) -> int:
     if first_eex and start < first_eex:
         get_logger().warning(f"no EEX before {first_eex}: those dates use own VWAPs "
                              f"(contract reconstruction enabled: {cfg.layer_arbitrage})")
-    res = CurveFiller(cfg, vw, maps, books).run(start, end)
+    days = _reference_days(cfg, raw, maps, books, start, end)
+    output_keys = {(day, m.key) for day in days for m in maps if m.active and m.use == "fill"}
+    res = CurveFiller(cfg, vw, maps, books).run(start, end, output_keys=output_keys)
     _require_complete(res)
     enriched = enrich_input(raw, res.filled, cfg, maps, start, end)
     _write(cfg, res, enriched)
@@ -395,7 +412,8 @@ def cmd_daily(cfg: Config, a) -> int:
     _out(_layers(cfg))
     if not (vw["date"] == day).any():
         get_logger().warning(f"no own VWAPs on {day}: using EEX and available historical adjustments")
-    res = CurveFiller(cfg, vw, maps, books).run(day, day)
+    output_keys = {(day, m.key) for m in maps if m.active and m.use == "fill"}
+    res = CurveFiller(cfg, vw, maps, books).run(day, day, output_keys=output_keys)
     _require_complete(res)
     enriched = enrich_input(raw, res.filled, cfg, maps, day, day)
     _write(cfg, res, enriched)
@@ -419,6 +437,20 @@ def _history_point_keys(path: Path, enriched: bool = False) -> set[tuple]:
         raise ValueError(f"Output history {path} contains empty or invalid reference dates")
     return {(day, *curve, str(tenor).strip())
             for day, curve, tenor in zip(dates, curve_keys(frame), frame["tenor"])}
+
+
+def _reference_days(cfg: Config, raw: pd.DataFrame, maps: list[ProductMap], books: dict,
+                    start: date, end: date) -> set[date]:
+    """Include weekdays and observed active dates even when own prices are invalid."""
+    date_col = cfg.vwap_columns.get("reference_date", "reference_date")
+    raw_dates = parse_reference_dates(raw[date_col]).dt.date
+    active = {m.key for m in maps if m.active}
+    observed = set(raw_dates[curve_keys(raw, cfg).isin(active)])
+    observed.update(day for book in books.values() if book is not None for day in book.trade_dates)
+    days = {day for day in observed if start <= day <= end}
+    days.update(start + timedelta(days=offset) for offset in range((end - start).days + 1)
+                if (start + timedelta(days=offset)).weekday() < 5)
+    return days
 
 
 def cmd_catchup(cfg: Config, a) -> int:
@@ -446,11 +478,7 @@ def cmd_catchup(cfg: Config, a) -> int:
     if start > end:
         raise ValueError("The start date cannot be later than the end date")
 
-    active = {m.key for m in maps if m.active}
-    observed_dates = set(raw_dates[curve_keys(raw, cfg).isin(active)]) | eex_dates
-    days = {day for day in observed_dates if start <= day <= end}
-    days.update(start + timedelta(days=offset) for offset in range((end - start).days + 1)
-                if (start + timedelta(days=offset)).weekday() < 5)
+    days = _reference_days(cfg, raw, maps, books, start, end)
     pending: set[tuple[date, CurveKey]] = set()
     for day in sorted(days):
         targets = [label for label in dict.fromkeys(cfg.tenors)
@@ -515,17 +543,29 @@ def cmd_backtest(cfg: Config, a) -> int:
         _out("No VWAPs with matching EEX in this range: nothing to evaluate.")
         return 1
     rep = summarize_loo(res.loo)
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    res.loo.to_csv(cfg.output_dir / "backtest_loo.csv", index=False, encoding="utf-8-sig")
-    rep.to_csv(cfg.output_dir / "backtest_report.csv", index=False, encoding="utf-8-sig")
-    _out("Leave-one-out: hide each own VWAP and predict it from the remaining observations (error = pred - own)\n")
-    _out(_table(rep))
+    comparison = None
     if a.truth:
         truth = pd.read_csv(cfg.resolve(a.truth), encoding="utf-8-sig", keep_default_na=False,
                             dtype={name: str for name in IDENTITY_COLUMNS})
-        truth["date"] = pd.to_datetime(truth["date"]).dt.date
+        required = ["date", *IDENTITY_COLUMNS, "tenor", "truth"]
+        missing = [name for name in required if name not in truth]
+        if missing:
+            raise ValueError(f"Synthetic truth lacks required columns: {missing}")
+        truth["date"] = parse_reference_dates(truth["date"]).dt.date
+        if truth["date"].isna().any():
+            raise ValueError("Synthetic truth contains invalid reference dates")
+        truth["truth"] = pd.to_numeric(truth["truth"], errors="coerce")
+        if not truth["truth"].map(math.isfinite).all():
+            raise ValueError("Synthetic truth prices must be finite numbers")
+        comparison = compare_truth(res.filled, truth)
+    with publication_lock(cfg.output_dir), CsvBatch() as batch:
+        batch.stage(cfg.output_dir / "backtest_loo.csv", res.loo)
+        batch.stage(cfg.output_dir / "backtest_report.csv", rep)
+    _out("Leave-one-out: hide each own VWAP and predict it from the remaining observations (error = pred - own)\n")
+    _out(_table(rep))
+    if comparison is not None:
         _out("\nFilled curve vs synthetic ground truth (cells without own VWAPs):\n")
-        _out(_table(compare_truth(res.filled, truth)))
+        _out(_table(comparison))
     return 0
 
 
@@ -575,9 +615,6 @@ def cmd_tune(cfg: Config, a) -> int:
         raise ValueError("No valid original observations are available for parameter evaluation")
     result = tune_parameters(cfg, vw, maps, books, a.start or min(vw["date"]),
                              a.end or max(vw["date"]), grid, a.validation_days, a.max_trials)
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    result.calibration_report.to_csv(cfg.output_dir / "tuning_calibration.csv", index=False, encoding="utf-8-sig")
-    result.validation_report.to_csv(cfg.output_dir / "tuning_validation.csv", index=False, encoding="utf-8-sig")
     selected = result.selected_config
     patch = {
         "method": {name: selected[name] for name in ("basis_mode", "tau_log", "shrink_k")},
@@ -588,8 +625,11 @@ def cmd_tune(cfg: Config, a) -> int:
               "base_configuration": asdict(cfg), "input_pattern": a.vwap or cfg.vwap_input,
               "selection": "Calibration dates only; validation dates are evaluated after selection.",
               "config_changed": False}
-    (cfg.output_dir / "tuning_selected.json").write_text(
-        json.dumps(_json_finite(report), indent=2, ensure_ascii=False, allow_nan=False, default=str), encoding="utf-8")
+    with publication_lock(cfg.output_dir), CsvBatch() as batch:
+        batch.stage(cfg.output_dir / "tuning_calibration.csv", result.calibration_report)
+        batch.stage(cfg.output_dir / "tuning_validation.csv", result.validation_report)
+        batch.stage_text(cfg.output_dir / "tuning_selected.json",
+                         json.dumps(_json_finite(report), indent=2, ensure_ascii=False, allow_nan=False, default=str))
     _out("Selected parameters (configuration unchanged):\n" + json.dumps(patch, indent=2))
     _out("Later-date validation:\n" + _table(result.validation_report))
     _out(f"Reports written to {cfg.output_dir}: tuning_calibration.csv, tuning_validation.csv, tuning_selected.json")
@@ -639,9 +679,9 @@ def cmd_synthetic(cfg: Config, a) -> int:
         return 1
     v, t = make_synthetic(cfg, maps, books, a.start, a.end, seed=a.seed, mode=a.mode)
     out = cfg.resolve(a.out)
-    out.mkdir(parents=True, exist_ok=True)
-    v.to_csv(out / "synthetic_vwaps.csv", index=False, encoding="utf-8-sig")
-    t.to_csv(out / "synthetic_truth.csv", index=False, encoding="utf-8-sig")
+    with publication_lock(out), CsvBatch() as batch:
+        batch.stage(out / "synthetic_vwaps.csv", v)
+        batch.stage(out / "synthetic_truth.csv", t)
     _out(f"{len(v)} synthetic VWAPs across {len(maps)} products -> {out / 'synthetic_vwaps.csv'} "
          f"(+ synthetic_truth.csv)")
     return 0

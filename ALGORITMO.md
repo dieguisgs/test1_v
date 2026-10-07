@@ -1918,7 +1918,7 @@ ya procesados o enriquecer todo el input. Consulta la sección 5.
 
 Este capítulo documenta las **58 claves del `config.toml` entregado**. Los valores por defecto se refieren a ese archivo, no a una configuración parcialmente omitida. Edita las secciones TOML existentes sin duplicarlas. Cambiar un parámetro modifica el modelo o la selección de datos; aumentarlo no implica que el precio suba ni que la estimación mejore.
 
-Las tablas separan el efecto del parámetro de las condiciones en las que interviene. Los rangos numéricos son recomendaciones operativas salvo que se indique expresamente que el cargador los valida. Revisa que los valores sean finitos y tengan sentido: el cargador no comprueba todos los límites recomendados.
+Las tablas separan el efecto del parámetro de las condiciones en las que interviene. El cargador y el motor validan tipos, números finitos y límites obligatorios. Se rechazan booleanos entre comillas y una cadena única en lugar de la lista de tenors. Los rangos de calibración recomendados siguen siendo orientativos: una configuración válida no implica precisión predictiva.
 
 ### Rutas: elegir la evidencia y los resultados
 
@@ -1929,7 +1929,7 @@ Las tablas separan el efecto del parámetro de las condiciones en las que interv
 | `paths.eex_curves_dir` | `"../eex_scraper/output/curves/POWER"` | Raíz de los `eex_file`, por ejemplo `DE/Base.csv`. Otro conjunto de datos cambia settlements e historia disponible. | Carga EEX. Relativa al config; las rutas del mapeo parten de ella. Campos necesarios: `tradeDate`, `maturityType`, `deliveryStart`, `settlPx`. No descarga datos ni convierte divisas. |
 | `paths.output_dir` | `"output"` | Destino de históricos enriquecidos/calculados, archivos diarios, informes y logs. Una carpeta nueva inicia otro histórico de resultados. | Escritura y consulta de resultados. Separa carpetas al comparar configuraciones. Los outputs antiguos sin identidad completa se rechazan antes de escribir resultados. |
 
-Se admiten rutas absolutas. Si un archivo asignado no puede leerse, se informa en el log y pueden seguir utilizándose observaciones propias y reconstrucciones de contratos válidas. Los precios EEX ausentes, no numéricos o no finitos se excluyen con aviso, conservando los válidos.
+Se admiten rutas absolutas. Un archivo EEX ausente se registra y permite utilizar propios o reconstrucciones admisibles. Un archivo presente ilegible/corrupto, settlements contradictorios para una fecha/periodo o un archivo no vacío sin settlements finitos utilizables aborta antes de publicar resultados. Un CSV válido con solo cabecera representa un dataset explícitamente vacío. Las filas inválidas de un archivo mixto se excluyen con aviso, conservando las válidas. La ausencia/vacío permitido sigue siendo un cambio de evidencia: repetir el cálculo puede sustituir estimaciones anteriores por missing.
 
 ### Capas: qué información puede influir en una estimación
 
@@ -2039,8 +2039,10 @@ Estos siete valores son **nombres de columnas**, no parámetros numéricos. Camb
 
 Para comparar configuraciones, cambia una familia cada vez, conserva los mismos originales y mapeo, y utiliza otra carpeta de salida. Compara `pipeline_configured` frente a EEX sobre las mismas observaciones ocultadas y dentro de cada unidad. Superar pruebas mecánicas o mejorar errores sintéticos no demuestra calidad predictiva sobre el dataset real de producción.
 
-Los settlements EEX ausentes/no numéricos/no finitos se excluyen con aviso; se conservan los
-válidos. Un resultado calculado no finito se considera error y evita escribir resultados.
+Los settlements EEX ausentes/no numéricos/no finitos se excluyen con aviso si quedan válidos;
+se rechaza una fuente no vacía sin settlements utilizables. Un resultado calculado no finito
+se considera error y evita escribir resultados. El [informe de revisión](CODE_REVIEW.es.md)
+detalla la gestión de fallos.
 
 
 ---
@@ -2515,3 +2517,43 @@ Es una conclusión de esa muestra y sus casos completos, no una garantía univer
 ni de concordancia entre VWAPs propios observados por separado. Los artefactos locales son
 `output/eex_quarter_audit/summary.csv` y `comparisons.csv`, ignorados por Git y no distribuidos.
 No calibran shape ni demuestran mejora al predecir precios ausentes.
+
+## 18. Resultados reproducibles e integridad de ejecución
+
+El [informe de revisión de código](CODE_REVIEW.es.md) distingue fallos corregidos de límites
+del modelo. Estas reglas forman parte del algoritmo y de su ejecución:
+
+- **Periodos propios repetidos:** cada observación usa su volumen positivo finito como peso
+  del precio; si es cero/desconocido, usa peso uno. Se acumulan por separado los pesos efectivos
+  y el volumen informado, de modo que reordenar filas no cambia el agregado. El volumen suma
+  los valores conocidos no negativos y queda ausente si todos son desconocidos. Por ejemplo,
+  precios 90, 100, 110 sin volumen dan 100 en cualquier orden. El enriquecido conserva las
+  filas físicas originales.
+- **Aliases propios equivalentes:** un intervalo común usa un tipo de evidencia determinista,
+  con prioridad Day, Weekend, Week, Month, Quarter, Season, Year, BOW, BOM. LOO oculta todas
+  sus etiquetas y evalúa la correspondiente a ese tipo canónico. Esto estabiliza la evidencia
+  observada; todavía no unifica estimaciones de objetivos de distintos tipos.
+- **Observaciones rechazadas:** un volumen conocido inferior a `min_volume` no puede alimentar
+  arbitrage, incluso sin EEX o si el original aparece entre los targets. El volumen desconocido
+  sigue siendo admisible. Se conserva el original. El filtro por desviación sí necesita EEX.
+- **Cabecera residual sin horas:** una cabecera cubierta sin horas de entrega aporta energía
+  cero. En Peak, retirar una cabecera formada solo por fin de semana deja el precio mensual
+  intacto; si faltan precios de horas positivas, el cálculo sigue bloqueado.
+- **Fechas y ejecuciones explícitas:** se rechazan números de fecha ambiguos y valores con
+  zona horaria, sin adivinarlos. Sí se admiten celdas Excel formateadas como fecha.
+  `daily --date` procesa esa fecha aunque sea fin de semana. Refill incorpora fechas de filas
+  originales cuyo VWAP es inválido, de acuerdo con el calendario requerido por catchup.
+- **Evaluación sintética:** los originales observados siguen excluidos aunque shape los haya
+  modificado. Los aliases cuentan una vez por periodo físico cuando alguno de los inputs de
+  comparación aporta sus fechas de entrega. Predicciones/verdades contradictorias entre aliases
+  producen error explícito; sin metadatos de periodo se conserva el scoring antiguo por etiqueta.
+  Las métricas usan cálculos escalados para evitar desbordamientos intermedios evitables.
+- **Publicación:** un bloqueo separa escritores durante lectura/fusión/publicación de históricos.
+  Se serializan todas las salidas en temporales antes de tocar los destinos. Cada reemplazo
+  es atómico. Los fallos e interrupciones manejables intentan restaurar el estado anterior;
+  si falla la recuperación se conservan y comunican las copias. No es una transacción de todos
+  los archivos frente a un apagado. Los lectores del notebook no toman ese bloqueo.
+
+Estas correcciones cambian resultados en los casos afectados: genera otra carpeta de salida
+para compararlos con ejecuciones anteriores. No validan precisión con propios reales que no
+tenemos ni seleccionan mejores familias de anclas; véase [la investigación](ANCHORS.es.md).

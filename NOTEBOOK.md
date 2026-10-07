@@ -69,6 +69,11 @@ The path cell is set up for the local validation run using
 GitHub**. On another computer, replace `OUTPUT_PATH` with the output CSV you generated or
 copied. The cell includes commented examples for both locations.
 
+To create this example on any computer, run `uv run python examples/generate_notebook_demo.py`
+from the repository root. It generates synthetic Day, Weekend, BOW, Week, BOM, Month,
+Quarter, Season and Year data without original inputs or EEX access. This script is separate
+from the notebook and writes the CSV to the validation path above.
+
 Edit the first code cell if necessary:
 
 ```python
@@ -96,20 +101,35 @@ the same CSV during inspection.
 
 ## The three views
 
-**Una fecha — one reference date.** Select the exact `(product, region, unit)` identity,
-contract kind and reference date. Month is selected initially when available; Day and the
-other saved kinds are also available. The chart compares final `price` with saved
+**Una fecha — one reference date.** Select the exact `(product, region, unit)` identity and
+reference date. The default **Curva completa (todos los tipos)** view shows all saved contracts
+for that curve and date together. The **Vista** selector can restrict the chart to Month,
+Quarter, Year or any other kind present in the CSV, retaining all its maturities. There is
+no two-quarter or six-month limit. The chart compares final `price` with saved
 `eex_settle`. Optional markers show `own_vwap`; an optional line shows `price_before_shape`.
 The detail table exposes source, flags, `eex_asof`, EEX age and shape status when available.
 
-Choosing all kinds uses markers only. It never joins monthly prices and quarterly averages
-into one mixed line. Delivery intervals use an exclusive end date.
+The horizontal axis shows contracts (`D+1`, `M+1`, `Q+1`, `Cal+1`, etc.), grouped by kind and
+ordered by delivery. Each contract has its own position even when a month, quarter and year
+start on the same date. Points are evenly spaced: **spacing does not represent time or delivery
+length**. Hover text contains the exact delivery dates; end dates are exclusive. Lines connect
+points within each kind and stop between kinds, marked by vertical separators. Legend controls
+toggle each price series across all kinds.
+
+The text above the chart counts saved contracts by kind. Every saved row is retained, including
+missing-price gaps; absent Q+3 or Cal+1 rows are never invented. The earlier demonstration CSV
+contained only six months and two quarters; the expanded example includes all nine kinds.
+After regenerating a CSV or updating the notebook, restart the kernel and run all cells to
+reload both data and functions.
 
 **Medias por rango — date-range averages.** Choose inclusive start/end dates, alignment,
 then click **Comparar rango**. Default alignment follows the same absolute delivery period
 through label changes. Relative-tenor alignment deliberately combines different deliveries:
 M+1 in September and M+1 in October are different contracts. The notebook displays a warning
 and reports `n_delivery_periods`.
+This tab also follows **Vista**, showing the full curve or all contracts of one kind. Each
+contract has its own horizontal position, labelled by delivery for absolute alignment or
+by tenor for relative alignment. Lines remain separate by kind.
 
 For each point, both means use **only reference dates where final price and EEX are finite**.
 Each paired date has equal weight; no volume or delivery-hour weighting is used here. Missing
@@ -161,5 +181,5 @@ If only text appears instead of widgets/charts, confirm the notebook dependency 
 installed and select its Python kernel. The repository's helper tests do not require Jupyter.
 
 Execution check: all notebook cells and interactive callbacks ran without errors on synthetic
-output containing 168 rows, seven dates and three curve identities, including range means
-under both absolute-period and rolling-label alignment.
+output containing seven dates, three curve identities and all nine supported kinds, including
+the full curve and range means under both absolute-period and rolling-label alignment.

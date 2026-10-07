@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from vwaps.visualization import (
-    available_curves, contract_evolution, coverage_metrics, find_project_root,
+    KIND_ORDER, available_curves, contract_evolution, coverage_metrics, curve_plot_points, find_project_root,
     load_output, paired_means, resolve_output_path, select_curve,
 )
 
@@ -168,3 +168,84 @@ def test_evolution_follows_absolute_contract_not_m1_label(tmp_path):
     assert len(select_curve(data, KEY, reference_date=date(2026, 9, 30))) == 2
     with pytest.raises(ValueError, match="start date"):
         paired_means(data, KEY, start="2026-10-02", end="2026-10-01")
+
+
+def test_complete_plot_preserves_all_families_and_every_saved_quarter(tmp_path):
+    rows = [row(kind=kind, tenor=f"contract-{kind}") for kind in reversed(KIND_ORDER)]
+    rows += [
+        row(kind="Quarter", tenor="Q+3", delivery_start="2027-04-01", delivery_end="2027-07-01"),
+        row(kind="Quarter", tenor="Q+8", delivery_start="2028-07-01", delivery_end="2028-10-01"),
+        row(kind="ZOther", tenor="z"), row(kind="AOther", tenor="a"),
+    ]
+    data = save(tmp_path, rows)
+    points = curve_plot_points(data)
+    assert len(points) == len(data) == 13
+    assert points["plot_x"].is_unique
+    assert list(points["kind"].drop_duplicates()) == [*KIND_ORDER, "AOther", "ZOther"]
+    quarters = points.loc[points["kind"].eq("Quarter")]
+    assert list(quarters["plot_label"]) == ["contract-Quarter", "Q+3", "Q+8"]
+    assert "plot_x" not in data  # Preparing a chart never modifies the saved observations.
+
+
+def test_month_quarter_year_starting_together_have_distinct_plot_positions(tmp_path):
+    data = save(tmp_path, [
+        row(kind="Month", tenor="M+4", delivery_start="2027-01-01", delivery_end="2027-02-01"),
+        row(kind="Quarter", tenor="Q+2", delivery_start="2027-01-01", delivery_end="2027-04-01"),
+        row(kind="Year", tenor="Cal+1", delivery_start="2027-01-01", delivery_end="2028-01-01"),
+    ])
+    points = curve_plot_points(data)
+    assert points["delivery_start"].nunique() == 1
+    assert points["plot_x"].nunique() == 3
+    assert list(points["plot_label"]) == ["M+4", "Q+2", "Cal+1"]
+    means = curve_plot_points(paired_means(data, KEY, kind=None))
+    assert list(means["plot_label"]) == ["2027-01", "2027-Q1", "Cal-2027"]
+    assert means["plot_x"].nunique() == 3
+
+
+def test_absolute_plot_orders_delivery_dates_instead_of_lexicographic_tenors(tmp_path):
+    data = save(tmp_path, [
+        row(tenor="M+10", delivery_start="2027-07-01", delivery_end="2027-08-01"),
+        row(tenor="M+2"),
+    ])
+    assert list(curve_plot_points(data)["plot_label"]) == ["M+2", "M+10"]
+
+
+def test_relative_plot_orders_numeric_offsets_and_distinguishes_season_bases():
+    means = pd.DataFrame({
+        "kind": ["Month", "Month", "Season", "Season", "Season", "Season"],
+        "tenor": ["M+10", "M+2", "Win+2", "Sum+1", "Win+1", "Sum+2"],
+        "price_mean": [10, 2, 22, 11, 21, 12],
+    })
+    points = curve_plot_points(means, alignment="tenor")
+    assert list(points["plot_label"]) == ["M+2", "M+10", "Sum+1", "Win+1", "Sum+2", "Win+2"]
+    assert list(points["price_mean"]) == [2, 10, 11, 21, 12, 22]
+    assert points["plot_x"].is_unique
+
+
+def test_plot_keeps_missing_contract_without_inventing_later_quarters(tmp_path):
+    data = save(tmp_path, [
+        row(kind="Quarter", tenor="Q+1", delivery_start="2026-10-01", delivery_end="2027-01-01",
+            source="missing", price=None, eex_settle=0),
+        row(kind="Quarter", tenor="Q+2", delivery_start="2027-01-01", delivery_end="2027-04-01",
+            price=-10, eex_settle=-8),
+    ])
+    points = curve_plot_points(data)
+    assert list(points["plot_label"]) == ["Q+1", "Q+2"]
+    assert pd.isna(points.loc[0, "price"]) and points.loc[0, "eex_settle"] == 0
+    assert points.loc[1, "price"] == -10
+
+
+def test_plot_rejects_repeated_contracts_until_dates_are_aggregated(tmp_path):
+    data = save(tmp_path, [row(), row(reference_date="2026-10-01", tenor="M+1")])
+    with pytest.raises(ValueError, match="aggregate dates first"):
+        curve_plot_points(data)
+    relative = pd.DataFrame({"kind": ["Month", "Month"], "tenor": ["M+1", "M+1"]})
+    with pytest.raises(ValueError, match="aggregate dates first"):
+        curve_plot_points(relative, alignment="tenor")
+
+
+def test_plot_empty_frame_and_invalid_alignment():
+    points = curve_plot_points(pd.DataFrame())
+    assert points.empty and list(points.columns) == ["plot_x", "plot_label"]
+    with pytest.raises(ValueError, match="alignment"):
+        curve_plot_points(pd.DataFrame(), alignment="unknown")

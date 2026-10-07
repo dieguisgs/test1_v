@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +11,7 @@ import pandas as pd
 from vwaps.config import load_config
 from vwaps.dates import parse_reference_dates
 from vwaps.identity import CurveKey, IDENTITY_COLUMNS
-from vwaps.tenors import parse_tenor
+from vwaps.tenors import Period, parse_tenor
 
 
 REQUIRED_COLUMNS = [
@@ -20,6 +21,7 @@ REQUIRED_COLUMNS = [
 PERIOD_COLUMNS = ["kind", "delivery_start", "delivery_end"]
 OBSERVATION_COLUMNS = ["reference_date", *IDENTITY_COLUMNS, *PERIOD_COLUMNS]
 NUMERIC_COLUMNS = ["price", "eex_settle", "price_before_shape", "own_vwap", "shape_adjustment"]
+KIND_ORDER = ("Day", "Weekend", "BOW", "Week", "BOM", "Month", "Quarter", "Season", "Year")
 
 
 def find_project_root(start: str | Path | None = None) -> Path:
@@ -173,6 +175,71 @@ def select_curve(
     if end is not None:
         selected &= frame["reference_date"].le(pd.Timestamp(end))
     return frame.loc[selected].copy()
+
+
+def curve_plot_points(frame: pd.DataFrame, *, alignment: str = "delivery") -> pd.DataFrame:
+    """Prepare distinct categorical positions for every saved curve contract.
+
+    Use one reference date or already aggregated paired means for one identity.
+    Delivery alignment orders absolute periods within each contract family;
+    relative alignment orders numeric tenor offsets, then their base labels.
+    Known families follow KIND_ORDER; unknown families follow alphabetically.
+    ``plot_x`` identifies the full contract rather than just its start date, so
+    a month, quarter and year starting together remain distinct. ``plot_label``
+    uses a supplied tenor, or an absolute period name for delivery means.
+
+    Prices and missing observations are preserved. No contracts are generated
+    and no dates are aggregated here: duplicate contract keys are rejected.
+    """
+    if alignment not in ("delivery", "tenor"):
+        raise ValueError("alignment must be delivery or tenor")
+    result = frame.copy()
+    if result.empty:
+        result["plot_x"] = pd.Series(index=result.index, dtype=str)
+        result["plot_label"] = pd.Series(index=result.index, dtype=str)
+        return result
+
+    keys = PERIOD_COLUMNS if alignment == "delivery" else ["kind", "tenor"]
+    missing = set(keys) - set(result)
+    if missing:
+        raise ValueError(f"Missing curve plot columns: {sorted(missing)}")
+    if result[keys].isna().any().any():
+        raise ValueError("Curve plot contract keys must not be missing")
+    if result.duplicated(keys, keep=False).any():
+        raise ValueError("Duplicate curve plot contracts; select one identity and date or aggregate dates first")
+
+    kind_rank = {kind: index for index, kind in enumerate(KIND_ORDER)}
+
+    def order_key(position: int) -> tuple:
+        row = result.iloc[position]
+        kind = str(row["kind"])
+        family = (kind_rank.get(kind, len(KIND_ORDER)), kind)
+        if alignment == "delivery":
+            return (*family, pd.Timestamp(row["delivery_start"]), pd.Timestamp(row["delivery_end"]))
+        tenor = str(row["tenor"])
+        parsed = parse_tenor(tenor)
+        return (*family, parsed[1] if parsed else float("inf"), parsed[0] if parsed else tenor, tenor)
+
+    result = result.iloc[sorted(range(len(result)), key=order_key)].reset_index(drop=True)
+    plot_keys, labels = [], []
+    for row in result.to_dict("records"):
+        kind = str(row["kind"])
+        if alignment == "tenor":
+            label = str(row["tenor"])
+            key = [kind, label]
+        else:
+            first, last = pd.Timestamp(row["delivery_start"]), pd.Timestamp(row["delivery_end"])
+            key = [kind, first.isoformat(), last.isoformat()]
+            tenor = row.get("tenor")
+            label = (
+                str(tenor) if pd.notna(tenor) and str(tenor).strip()
+                else Period(kind, first.date(), last.date()).name
+            )
+        plot_keys.append(json.dumps(key, ensure_ascii=False, separators=(",", ":")))
+        labels.append(label)
+    result["plot_x"] = plot_keys
+    result["plot_label"] = labels
+    return result
 
 
 def coverage_metrics(frame: pd.DataFrame) -> dict:

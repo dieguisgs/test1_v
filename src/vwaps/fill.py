@@ -31,7 +31,7 @@ from vwaps.basis import (
     local_basis, log_ttm,
 )
 from vwaps.comove import EWCov
-from vwaps.config import Config, validate_shape_config
+from vwaps.config import Config, validate_config
 from vwaps.eex_fallback import EexFallback
 from vwaps.consistency import check_day
 from vwaps.hours import hours_fn
@@ -45,6 +45,11 @@ from vwaps.tenors import Key, Period, resolve_tenor
 
 MODES = ("additive", "ratio")
 GROUPS = ("short", "month", "quarter", "long")
+# Equal delivery intervals can have both full-contract and residual labels.
+# Their evidence kind must not depend on the original CSV row order.
+OWN_KIND_ORDER = {kind: index for index, kind in enumerate((
+    "Day", "Weekend", "Week", "Month", "Quarter", "Season", "Year", "BOW", "BOM",
+))}
 
 
 @dataclass
@@ -128,7 +133,7 @@ class RunResult:
 class CurveFiller:
     def __init__(self, cfg: Config, vwaps: pd.DataFrame, maps: list[ProductMap],
                  books: dict[CurveKey | str, EexBook | None]):
-        validate_shape_config(cfg)
+        validate_config(cfg)
         self.cfg = cfg
         self.vwaps = vwaps
         self.maps = [m for m in maps if m.active]
@@ -237,9 +242,21 @@ class CurveFiller:
 
     # ------------------------------------------------------- prepare the day
     def _own_quotes(self, day: date, g: pd.DataFrame | None, hfn) -> dict[Key, OwnQuote]:
-        out: dict[Key, OwnQuote] = {}
+        """Aggregate equal delivery intervals independently of input row order.
+
+        Each positive finite volume weights its price; zero or unknown volume
+        uses unit weight. These effective weights are separate from reported
+        volume, which sums known nonnegative values and stays unknown when all
+        volumes are unknown. Invalid/negative volumes are treated as unknown.
+
+        Equivalent aliases use a deterministic evidence kind: full contracts
+        (Day, Weekend, Week, Month, Quarter, Season, Year) precede BOW and BOM.
+        This prevents CSV row order from changing local weights or history.
+        Original rows remain untouched; alias labels are sorted and unique.
+        """
         if g is None:
-            return out
+            return {}
+        grouped: dict[Key, list[tuple[Period, str, float, float]]] = {}
         for tenor, vwap, vol in g[["tenor", "vwap", "volume"]].itertuples(index=False):
             per = resolve_tenor(tenor, day, self.cfg.day_convention, self.cfg.weekend_offset)
             if per is None or not math.isfinite(float(vwap)):
@@ -248,16 +265,31 @@ class CurveFiller:
             # hours. They are not aliases of the quoted contract.
             if hfn(per.start, per.end, kind=per.kind) <= 0:
                 continue
-            vol = float(vol) if vol == vol else float("nan")
-            q = out.get(per.key)
-            if q is None:
-                out[per.key] = OwnQuote(per, [tenor], float(vwap), vol)
-            else:  # Repeated delivery period: aggregate using volume weights.
-                w1 = q.volume if q.volume == q.volume and q.volume > 0 else 1.0
-                w2 = vol if vol == vol and vol > 0 else 1.0
-                q.vwap = (q.vwap * w1 + float(vwap) * w2) / (w1 + w2)
-                q.volume = (q.volume if q.volume == q.volume else 0) + (vol if vol == vol else 0)
-                q.tenors.append(tenor)
+            vol = float(vol)
+            if not math.isfinite(vol) or vol < 0:
+                vol = math.nan
+            grouped.setdefault(per.key, []).append((per, str(tenor), float(vwap), vol))
+        out: dict[Key, OwnQuote] = {}
+        for key, observations in grouped.items():
+            period = min((row[0] for row in observations),
+                         key=lambda per: (OWN_KIND_ORDER[per.kind], per.kind))
+            weights = [row[3] if math.isfinite(row[3]) and row[3] > 0 else 1.0
+                       for row in observations]
+            weight_scale = max(weights)
+            weights = [weight / weight_scale for weight in weights]
+            total = math.fsum(weights)
+            price_scale = max(abs(row[2]) for row in observations)
+            if price_scale:
+                scaled_price = math.fsum((row[2] / price_scale) * (weight / total)
+                                         for row, weight in zip(observations, weights))
+                # A convex average cannot leave the range of its inputs.
+                scaled_price = max(-1.0, min(1.0, scaled_price))
+                price = price_scale * scaled_price
+            else:
+                price = 0.0
+            known_volumes = [row[3] for row in observations if math.isfinite(row[3])]
+            volume = math.fsum(known_volumes) if known_volumes else math.nan
+            out[key] = OwnQuote(period, sorted({row[1] for row in observations}), price, volume)
         return out
 
     def _prep(self, s: Series, day: date) -> DayPrep:
@@ -269,12 +301,17 @@ class CurveFiller:
         own = self._own_quotes(day, s.own_by_day.get(day), s.hfn)
         candidates, bad, rejected = [], [], set()
         for q in own.values():
+            # Liquidity is observable without EEX. Apply it before reference
+            # matching so reconstruction cannot bypass a configured minimum.
+            if math.isfinite(q.volume) and q.volume < cfg.min_volume:
+                bad.append(f"{','.join(q.tenors)} volume {q.volume:g} < {cfg.min_volume:g}")
+                rejected.add(q.period.key)
+                continue
             r = eex.price(q.period.start, q.period.end, kind=q.period.kind)
             if r is None or not math.isfinite(r[0]):
                 continue
             deviation = abs(q.vwap - r[0]) / max(abs(r[0]), cfg.ratio_eex_floor)
-            if (math.isfinite(q.volume) and q.volume < cfg.min_volume) or (
-                    cfg.max_anchor_dev > 0 and deviation > cfg.max_anchor_dev):
+            if cfg.max_anchor_dev > 0 and deviation > cfg.max_anchor_dev:
                 bad.append(f"{','.join(q.tenors)} {q.vwap:g} vs EEX {r[0]:g}")
                 rejected.add(q.period.key)
                 continue
@@ -476,7 +513,8 @@ class CurveFiller:
 
         if pending and cfg.layer_arbitrage:  # Filled contracts plus VWAPs outside the target list.
             known = {(x["delivery_start"], x["delivery_end"]): x["price"]
-                     for x in rows if x["source"] != "missing" and x["hours"] > 0}
+                     for x in rows if x["source"] != "missing" and x["hours"] > 0
+                     and (x["delivery_start"], x["delivery_end"]) not in p.rejected}
             for k, q in p.own.items():
                 if k not in p.rejected:
                     known.setdefault(k, q.vwap)
@@ -568,7 +606,11 @@ class CurveFiller:
             # Hide the observation from every mode before auto selects a mode.
             hidden = replace(p, own={k: q for k, q in p.own.items() if k != a.period.key},
                              anchors=others, mode_anchors=others_by_mode)
-            label = p.own[a.period.key].tenors[0]
+            # Score the same canonical contract kind used by the observation's
+            # evidence and diagnostic group, even if a residual alias sorts first.
+            label = next(label for label in p.own[a.period.key].tenors
+                         if resolve_tenor(label, day, cfg.day_convention,
+                                          cfg.weekend_offset).kind == a.period.kind)
             # Contract reconstruction can depend on other estimated targets.
             # Replay the production target set with this whole period hidden.
             deployed = self._fill(s, day, {**preps, s.key: hidden}, labels=[*cfg.tenors, label])

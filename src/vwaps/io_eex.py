@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from vwaps.dates import parse_reference_dates
 from vwaps.log import get_logger
 from vwaps.tenors import Key, period_from_eex
 
@@ -36,10 +37,15 @@ def load_eex_frame(path: Path) -> pd.DataFrame:
             "%s: excluded %d missing, invalid or nonfinite EEX settlements; retained %d rows",
             path, invalid_count, int(valid.sum()),
         )
+        if not valid.any():
+            raise ValueError(f"{path}: the nonempty EEX file contains no finite settlement prices")
     df = df.loc[valid].copy()
     df["settlPx"] = prices.loc[valid]
-    df["tradeDate"] = pd.to_datetime(df["tradeDate"]).dt.date
-    df["deliveryStart"] = pd.to_datetime(df["deliveryStart"]).dt.date
+    for name in ("tradeDate", "deliveryStart"):
+        dates = parse_reference_dates(df[name])
+        if dates.isna().any():
+            raise ValueError(f"{path}: {int(dates.isna().sum())} invalid {name} dates")
+        df[name] = dates.dt.date
     return df
 
 
@@ -62,7 +68,11 @@ class EexBook:
             per = period_from_eex(mt, ds)
             if per is None:
                 continue
-            by_date.setdefault(td, {})[per.key] = price
+            daily = by_date.setdefault(td, {})
+            if per.key in daily and daily[per.key] != price:
+                raise ValueError(f"Conflicting EEX settlements for {td}, {per.start}..{per.end}: "
+                                 f"{daily[per.key]} and {price}")
+            daily[per.key] = price
             # Keep fixings published after delivery as well. Select them
             # at query time to avoid look-ahead bias.
             if mt == "Day":
@@ -82,7 +92,11 @@ class EexBook:
 
     @classmethod
     def from_file(cls, path: Path) -> EexBook:
-        return cls(load_eex_frame(path))
+        frame = load_eex_frame(path)
+        book = cls(frame)
+        if not frame.empty and not book.trade_dates:
+            raise ValueError(f"{path}: the nonempty EEX file contains no supported delivery contracts")
+        return book
 
     @property
     def trade_dates(self) -> list[date]:

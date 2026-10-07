@@ -8,6 +8,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from vwaps.tenors import parse_tenor
+
 
 @dataclass
 class Config:
@@ -103,11 +105,80 @@ def validate_shape_config(cfg: Config) -> None:
             raise ValueError("shape.original_weight must be >= 1")
 
 
+def validate_config(cfg: Config) -> None:
+    """Validate user-controlled types and finite bounds before calculations."""
+    for name in ("local", "correlation", "cross", "arbitrage"):
+        if not isinstance(getattr(cfg, f"layer_{name}"), bool):
+            raise ValueError(f"layers.{name} must be a boolean, not a quoted string or number")
+    for name, value, choices in (
+        ("method.basis_mode", cfg.basis_mode, ("auto", "additive", "ratio")),
+        ("conventions.day", cfg.day_convention, ("calendar", "business")),
+        ("layers.hist", cfg.layer_hist, ("on", "off", "auto")),
+    ):
+        if value not in choices:
+            raise ValueError(f"{name} must be one of {choices}")
+    if not isinstance(cfg.tenors, list) or any(not isinstance(label, str) for label in cfg.tenors):
+        raise ValueError("targets.tenors must be a list of tenor strings")
+    for label in cfg.tenors:
+        parsed = parse_tenor(label)
+        if parsed is None or (parsed[0] in ("Sum", "Win") and parsed[1] < 1):
+            raise ValueError(f"targets.tenors contains an unsupported tenor: {label!r}")
+    numbers = {
+        "min_volume": ("method.min_volume", False),
+        "tau_log": ("method.tau_log", True),
+        "other_kind_weight": ("method.other_kind_weight", False),
+        "shrink_k": ("method.shrink_k", True),
+        "ewma_halflife_days": ("method.ewma_halflife_days", True),
+        "max_anchor_dev": ("method.max_anchor_dev", False),
+        "hist_auto_min_obs": ("method.hist_auto_min_obs", False),
+        "ratio_eex_floor": ("method.ratio_eex_floor", True),
+        "max_ratio_deviation": ("method.max_ratio_deviation", True),
+        "corr_halflife_days": ("correlation.halflife_days", True),
+        "corr_prior_obs": ("correlation.prior_obs", False),
+        "cross_min_obs": ("cross.min_obs", False),
+        "cross_halflife_days": ("cross.halflife_days", True),
+    }
+    for attribute, (label, positive) in numbers.items():
+        value = getattr(cfg, attribute)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0 or (positive and value == 0)):
+            raise ValueError(f"{label} must be a finite {'positive' if positive else 'nonnegative'} number")
+    for attribute, label, minimum in (
+        ("warn_stale_days", "eex.warn_stale_days", 0),
+        ("warmup_days", "run.warmup_days", 0),
+        ("hist_max_age_days", "method.hist_max_age_days", 1),
+        ("weekend_offset", "conventions.weekend_offset", None),
+    ):
+        value = getattr(cfg, attribute)
+        if isinstance(value, bool) or not isinstance(value, int) or (minimum is not None and value < minimum):
+            raise ValueError(f"{label} must be an integer" + (f" >= {minimum}" if minimum is not None else ""))
+    if cfg.max_stale_days is not None and (
+        isinstance(cfg.max_stale_days, bool) or not isinstance(cfg.max_stale_days, int) or cfg.max_stale_days < 0
+    ):
+        raise ValueError("eex.max_stale_days must be an integer >= 0 (0 means unlimited in TOML)")
+    value = cfg.cross_min_corr
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or not -1 <= value <= 1):
+        raise ValueError("cross.min_corr must be a finite number between -1 and 1")
+    for label, values in (("timezones", cfg.timezones), ("vwap_columns", cfg.vwap_columns)):
+        if not isinstance(values, dict) or any(not isinstance(v, str) or not v.strip() for v in values.values()):
+            raise ValueError(f"{label} must be a table of nonempty strings")
+    validate_fallback_config(cfg)
+    validate_shape_config(cfg)
+
+
 def load_config(path: str | Path) -> Config:
     path = Path(path).resolve()
     with open(path, "rb") as fh:
         raw = tomllib.load(fh)
+    for section in ("paths", "layers", "method", "conventions", "eex", "correlation", "cross",
+                    "eex_fallback", "shape", "targets", "timezones", "run", "vwap_columns"):
+        if section in raw and not isinstance(raw[section], dict):
+            raise ValueError(f"{section} must be a TOML table")
     paths = raw.get("paths", {})
+    for name, value in paths.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"paths.{name} must be a nonempty path string")
     layers = raw.get("layers", {})
     method = raw.get("method", {})
     conv = raw.get("conventions", {})
@@ -116,39 +187,40 @@ def load_config(path: str | Path) -> Config:
     cross = raw.get("cross", {})
     fallback = raw.get("eex_fallback", {})
     shape = raw.get("shape", {})
+    hist = layers.get("hist", "auto")
     cfg = Config(
         base_dir=path.parent,
         vwap_input=paths.get("vwap_input", "data/vwaps.csv"),
         mapping_file=Path(), eex_curves_dir=Path(), output_dir=Path(),
-        layer_local=bool(layers.get("local", True)),
-        layer_correlation=bool(layers.get("correlation", False)),
-        layer_cross=bool(layers.get("cross", False)),
-        layer_hist=str(layers.get("hist", "auto")).lower(),
-        layer_arbitrage=bool(layers.get("arbitrage", False)),
-        max_stale_days=int(eex.get("max_stale_days", 0)) or None,
-        warn_stale_days=int(eex.get("warn_stale_days", 3)),
+        layer_local=layers.get("local", True),
+        layer_correlation=layers.get("correlation", False),
+        layer_cross=layers.get("cross", False),
+        layer_hist=hist.lower() if isinstance(hist, str) else hist,
+        layer_arbitrage=layers.get("arbitrage", False),
+        max_stale_days=eex.get("max_stale_days", 0),
+        warn_stale_days=eex.get("warn_stale_days", 3),
         timezones=dict(raw.get("timezones", {"default": "Europe/Berlin"})),
-        tenors=list(raw.get("targets", {}).get("tenors", [])),
+        tenors=raw.get("targets", {}).get("tenors", []),
         day_convention=conv.get("day", "calendar"),
-        weekend_offset=int(conv.get("weekend_offset", 0)),
+        weekend_offset=conv.get("weekend_offset", 0),
         basis_mode=method.get("basis_mode", "auto"),
-        min_volume=float(method.get("min_volume", 0)),
-        tau_log=float(method.get("tau_log", 0.5)),
-        other_kind_weight=float(method.get("other_kind_weight", 0.6)),
-        shrink_k=float(method.get("shrink_k", 1.0)),
-        ewma_halflife_days=float(method.get("ewma_halflife_days", 10)),
-        max_anchor_dev=float(method.get("max_anchor_dev", 0)),
-        hist_auto_min_obs=float(method.get("hist_auto_min_obs", 10)),
-        corr_halflife_days=float(corr.get("halflife_days", 20)),
-        corr_prior_obs=float(corr.get("prior_obs", 8)),
-        cross_min_corr=float(cross.get("min_corr", 0.5)),
-        cross_min_obs=float(cross.get("min_obs", 8)),
-        cross_halflife_days=float(cross.get("halflife_days", 20)),
-        warmup_days=int(raw.get("run", {}).get("warmup_days", 0)),
+        min_volume=method.get("min_volume", 0),
+        tau_log=method.get("tau_log", 0.5),
+        other_kind_weight=method.get("other_kind_weight", 0.6),
+        shrink_k=method.get("shrink_k", 1.0),
+        ewma_halflife_days=method.get("ewma_halflife_days", 10),
+        max_anchor_dev=method.get("max_anchor_dev", 0),
+        hist_auto_min_obs=method.get("hist_auto_min_obs", 10),
+        corr_halflife_days=corr.get("halflife_days", 20),
+        corr_prior_obs=corr.get("prior_obs", 8),
+        cross_min_corr=cross.get("min_corr", 0.5),
+        cross_min_obs=cross.get("min_obs", 8),
+        cross_halflife_days=cross.get("halflife_days", 20),
+        warmup_days=raw.get("run", {}).get("warmup_days", 0),
         vwap_columns=dict(raw.get("vwap_columns", {})),
-        ratio_eex_floor=float(method.get("ratio_eex_floor", 1.0)),
-        max_ratio_deviation=float(method.get("max_ratio_deviation", 1.0)),
-        hist_max_age_days=int(method.get("hist_max_age_days", 60)),
+        ratio_eex_floor=method.get("ratio_eex_floor", 1.0),
+        max_ratio_deviation=method.get("max_ratio_deviation", 1.0),
+        hist_max_age_days=method.get("hist_max_age_days", 60),
         fallback_price_method=fallback.get("price_method", "ewma"),
         fallback_price_window=fallback.get("price_window", 5),
         fallback_ewma_halflife=fallback.get("ewma_halflife", 2.0),
@@ -165,18 +237,7 @@ def load_config(path: str | Path) -> Config:
     cfg.mapping_file = cfg.resolve(paths.get("mapping", "mappings/products.csv"))
     cfg.eex_curves_dir = cfg.resolve(paths.get("eex_curves_dir", "../eex_scraper/output/curves/POWER"))
     cfg.output_dir = cfg.resolve(paths.get("output_dir", "output"))
-    if cfg.basis_mode not in ("auto", "additive", "ratio"):
-        raise ValueError(f"basis_mode must be auto, additive or ratio, not {cfg.basis_mode!r}")
-    if cfg.day_convention not in ("calendar", "business"):
-        raise ValueError(f"conventions.day must be calendar or business, not {cfg.day_convention!r}")
-    if cfg.layer_hist not in ("on", "off", "auto"):
-        raise ValueError(f"layers.hist must be on, off or auto, not {cfg.layer_hist!r}")
-    if cfg.tau_log <= 0 or cfg.shrink_k <= 0 or cfg.ewma_halflife_days <= 0:
-        raise ValueError("tau_log, shrink_k and ewma_halflife_days must be positive")
-    if cfg.ratio_eex_floor <= 0 or cfg.max_ratio_deviation <= 0 or cfg.hist_max_age_days <= 0:
-        raise ValueError("ratio_eex_floor, max_ratio_deviation and hist_max_age_days must be positive")
-    if cfg.warmup_days < 0:
-        raise ValueError("warmup_days must be >= 0; 0 replays all original history")
-    validate_fallback_config(cfg)
-    validate_shape_config(cfg)
+    validate_config(cfg)
+    if cfg.max_stale_days == 0:
+        cfg.max_stale_days = None
     return cfg

@@ -1893,7 +1893,7 @@ or enrich the complete input. See section 5.
 
 This chapter is a complete reference to the **58 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
 
-The tables distinguish a parameter's effect from the conditions under which it matters. Numeric operating ranges are guidance unless explicitly described as loader validation. Validate finite values and sensible ranges when editing the configuration; the loader does not enforce every recommended bound.
+The tables distinguish a parameter's effect from the conditions under which it matters. The loader and engine validate types, finite numbers and required bounds. Quoted booleans and a single string in place of the tenor list are rejected. Recommended calibration ranges remain guidance; validity does not imply predictive quality.
 
 ### Paths: selecting the evidence and output
 
@@ -1904,7 +1904,7 @@ The tables distinguish a parameter's effect from the conditions under which it m
 | `paths.eex_curves_dir` | `"../eex_scraper/output/curves/POWER"` | Root used to resolve each mapping row's `eex_file`, such as `DE/Base.csv`. A different dataset changes settlements and available history. | EEX loading. Relative to the config; mapping paths are relative to this root. Required EEX fields: `tradeDate`, `maturityType`, `deliveryStart`, `settlPx`. This is not a download command or currency conversion. |
 | `paths.output_dir` | `"output"` | Destination for enriched/calculated histories, daily files, reports and logs. A new folder starts a separate result history. | Writing/reporting commands. Preserve a separate output folder when comparing configurations. Legacy result files without complete curve identity are rejected before result writes. |
 
-Absolute paths are allowed. A file assigned in the mapping but unavailable for reading is reported in the log; existing own observations and eligible contract reconstruction can still be used. Missing, nonnumeric and nonfinite EEX prices are excluded with a warning, without changing valid prices.
+Absolute paths are allowed. An absent EEX file is logged and permits own observations or eligible reconstruction. A present unreadable/corrupt file, conflicting settlements for the same date/period, or a nonempty file without usable finite settlements aborts before result publication. A valid header-only file is an explicitly empty dataset. Mixed invalid/valid prices are filtered with a warning, preserving valid quotes. An allowed absent/empty dataset is still a change of evidence: rerunning can replace earlier estimates with missing values.
 
 ### Layers: which information can influence an estimate
 
@@ -2014,8 +2014,9 @@ These seven values are **column names**, not numerical parameters. Changing one 
 
 For a controlled comparison, change one family of settings at a time, retain the same original data and mapping, and write to a separate output directory. Compare `pipeline_configured` against EEX on matching held-out observations within each unit. Passing mechanical tests or improving synthetic errors does not establish predictive quality on the real production dataset.
 
-Missing, nonnumeric or nonfinite EEX settlements are excluded with a warning; valid quotes
-remain. A nonfinite calculated result is an error and prevents result writes.
+Missing, nonnumeric or nonfinite EEX settlements are excluded with a warning when valid quotes
+remain; a nonempty source without usable settlements is rejected. A nonfinite calculated result
+is an error and prevents result writes. See [the code review](CODE_REVIEW.md) for failure handling.
 
 
 ---
@@ -2487,3 +2488,42 @@ These results describe that sample and available complete cases, not a universal
 guarantee or expected agreement of separately observed own VWAPs. Local audit artifacts are
 `output/eex_quarter_audit/summary.csv` and `comparisons.csv`; they are Git-ignored and are
 not distributed. They do not calibrate the shape layer or prove improved missing-price accuracy.
+
+## 18. Determinism and operational integrity
+
+The [code-review report](CODE_REVIEW.md) distinguishes repaired defects from modeling limits.
+These rules are part of the implemented algorithm and execution contract:
+
+- **Repeated own periods:** each observation receives its positive finite volume as a price
+  weight; zero/unknown volume receives unit weight. The weighted numerator and effective
+  denominator are accumulated separately from reported volume, so reordering rows cannot
+  change their aggregate. Reported volume sums known nonnegative values and remains missing
+  if all volumes are unknown. For example, prices 90, 100, 110 with unknown volumes aggregate
+  to 100 in every order. Original physical rows are still preserved in enriched output.
+- **Equivalent observed aliases:** a common delivery interval uses one deterministic evidence
+  kind, preferring Day, Weekend, Week, Month, Quarter, Season, Year, BOW, BOM in that order.
+  LOO hides all its labels and evaluates the label belonging to this canonical kind. This
+  rule stabilizes observed evidence; it does not yet unify estimated targets of different kinds.
+- **Rejected observations:** a known volume below `min_volume` cannot feed reconstruction,
+  even without EEX or when the original appears among the configured targets. Unknown volume
+  remains admissible. The original itself is preserved. Deviation checks still require EEX.
+- **Zero-hour residual head:** a covered head with no delivery hours contributes zero energy.
+  For Peak, removing a weekend-only head from a monthly contract leaves its price unchanged;
+  missing positive-hour prices still block the calculation.
+- **Dates and explicit runs:** ambiguous numeric dates and timezone-bearing values are
+  rejected instead of guessed. A spreadsheet cell formatted as a date is supported.
+  `daily --date` processes that date even on a weekend. Refill includes dates of original
+  rows whose VWAP is invalid, matching catchup's calendar of required observations.
+- **Synthetic evaluation:** observed originals remain excluded after shape adjustment.
+  Aliases count once per physical period when either comparison input contains period
+  metadata. Conflicting alias predictions/truths fail explicitly; legacy inputs without
+  periods retain per-label scoring. LOO and synthetic error reductions use scaled arithmetic.
+- **Publishing files:** writers are serialized during history read/merge/publication. All
+  files are serialized to temporary files before any destination is changed. Replacement is
+  atomic per file. Ordinary failures and handled interrupts attempt rollback; failed recovery
+  retains and reports backup paths. This is not a multi-file transaction across a power loss,
+  and notebook readers do not acquire the writer lock.
+
+The repair changes affected edge-case outputs, so regenerate a separate result folder before
+comparing an older run. It does not validate the model on unavailable real own data or select
+better local-anchor families; see [anchor research](ANCHORS.md).

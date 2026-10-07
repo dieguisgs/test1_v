@@ -672,7 +672,7 @@ demuestra el comportamiento cuando falta una curva diaria entera, ni conoce la v
 huecos reales. No reajustes repetidamente contra el mismo tramo reservado y después lo
 presentes como evidencia independiente. Reserva nuevas fechas para evaluar cambios posteriores.
 
-Los settlements EEX ausentes/no numéricos/no finitos se excluyen con aviso conservando los válidos. Un precio calculado no finito hace fallar el cálculo y evita escribir resultados.
+Los settlements EEX ausentes/no numéricos/no finitos se excluyen con aviso conservando los válidos. Un archivo presente corrupto o una fuente EEX no vacía sin settlements utilizables aborta la publicación. Un precio calculado no finito también hace fallar el cálculo. Los archivos ausentes y los CSV válidos con solo cabecera mantienen el comportamiento sin EEX documentado; repetir el cálculo con menos evidencia puede sustituir estimaciones anteriores.
 
 <a id="shape-layer"></a>
 
@@ -701,7 +701,7 @@ garantiza mejor predicción ni continuidad al cambiar el calendario.
 
 ### Configuración completa [shape]
 
-Estas siete entradas elevan a 57 las claves del config. Los valores iniciales no están
+Estas siete entradas completan las 58 claves del config. Los valores iniciales no están
 calibrados. [SHAPE.es.md](SHAPE.es.md) detalla fórmulas, ejemplos, diagnóstico e histórico.
 
 | Clave | Inicial | Significado y efecto |
@@ -757,3 +757,15 @@ informa cada agregado y el resultado global, o null si no hay agregado aplicable
 valor numérico se interpreta en la unidad de cada curva; no es un porcentaje ni convierte monedas.
 
 Esta capa por horas es específica de los contratos de power admitidos. No debe trasladarse a curvas agrícolas u otros activos sin validar sus entregas; véanse [el alcance y la muestra EEX observada](SHAPE.es.md#por-qué-es-específico-de-power-y-qué-mostró-la-muestra-eex).
+
+## Revisión de código y ejecución fiable
+
+[CODE_REVIEW.es.md](CODE_REVIEW.es.md) recoge defectos reproducidos, correcciones, pruebas y
+límites pendientes. Se han reforzado la agregación de aliases, las validaciones, la protección
+de archivos y las métricas. La [sección 18 del algoritmo](ALGORITMO.md#18-resultados-reproducibles-e-integridad-de-ejecución)
+explica las reglas operativas actuales. Pasar tests no demuestra precisión en huecos reales.
+
+El notebook inicia en **Curva completa**, con todos los contratos guardados para la curva y
+fecha seleccionadas. Para reproducir aquí o en otro ordenador el ejemplo de nueve familias:
+`uv run python examples/generate_notebook_demo.py`. Después reinicia el kernel y ejecuta todas
+las celdas. El CSV generado es sintético y no se publica en GitHub.
