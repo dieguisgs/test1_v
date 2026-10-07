@@ -253,6 +253,14 @@ class _Tracker:
         frame.to_csv(path, index=False, encoding="utf-8-sig")
         self.client.log_artifact(child["id"], str(path), artifact_path="predictions")
 
+    def curves(self, child, stage, frame):
+        """Persist the full refill, including originals, separately from LOO."""
+        if not self.log_predictions:
+            return
+        path = child["folder"] / f"{stage}_filled.csv"
+        frame.to_csv(path, index=False, encoding="utf-8-sig")
+        self.client.log_artifact(child["id"], str(path), artifact_path="curves")
+
     def terminate(self, run_id, status):
         with _quiet_mlflow_termination():
             self.client.set_terminated(run_id, status=status)
@@ -288,6 +296,8 @@ class _Tracker:
             folder.mkdir()
             child = self.children[trial_id] = {"id": run_id, "folder": folder}
             self.client.set_tag(run_id, "vwaps.predictions", "disabled" if not self.log_predictions else "enabled")
+            self.client.set_tag(run_id, "vwaps.curve_outputs", "enabled" if self.log_predictions else "disabled")
+            self.client.set_tag(run_id, "vwaps.curve_outputs_kind", "full_refill_with_originals")
             parameters = {"eex_offset_days": self.cfg.eex_offset_days, **payload["parameters"]}
             self.client.log_batch(run_id, params=[self.entities.Param(key, str(value))
                                                  for key, value in parameters.items()], synchronous=True)
@@ -297,7 +307,9 @@ class _Tracker:
             return
         child = self.children[trial_id]
         run_id, folder = child["id"], child["folder"]
-        if event == "calibration_evaluated":
+        if event == "curves_evaluated":
+            self.curves(child, payload["stage"], payload["filled"])
+        elif event == "calibration_evaluated":
             self.predictions(child, "calibration", payload["available"])
             self.client.set_tag(run_id, "vwaps.stage", "calibration_evaluated_awaiting_common_sample")
         elif event == "calibration_scored":
@@ -325,7 +337,11 @@ def run_tracked_tuning(
     """Track the existing tuner without changing its calculations or selection.
 
     Reports, configuration, fingerprints and code provenance are logged to the
-    explicitly configured local tracking service. Optional price-level predictions
+    explicitly configured local tracking service. ``log_predictions`` controls
+    both paired LOO predictions and full refill curves, which retain observed
+    originals and cannot be interpreted as withheld accuracy predictions.
+    Full curves come from the existing engine calls: calibration for every
+    candidate and validation for the selected candidate only. Price artifacts
     are written locally and logged through the service's artifact store, including
     a loopback server's artifact proxy. SQLite/file tracking gets a local artifact location when this function
     creates an experiment. An existing experiment retains its artifact store.
@@ -370,6 +386,8 @@ def run_tracked_tuning(
         "mlflow.runName": f"vwaps-tuning-{data_label}", "vwaps.data_label": data_label,
         "vwaps.protocol": "calibration_grid_then_single_winner_holdout",
         "vwaps.tunable_fields": ",".join(EXPERIMENT_TUNABLE_FIELDS),
+        "vwaps.curve_outputs": "enabled" if log_predictions else "disabled",
+        "vwaps.curve_outputs_kind": "full_refill_with_originals",
     })
     run_id = parent.info.run_id
     folder = root / run_id
@@ -395,7 +413,7 @@ def run_tracked_tuning(
                                                 "data_label": data_label, "start": start, "end": end,
                                                 "log_predictions": log_predictions, "state": "RUNNING"})
         result = tune_parameters(cfg, vw, maps, books, start, end, parameter_grid, validation_days, max_trials,
-                                 observer=tracker, extended_grid=True)
+                                 observer=tracker, extended_grid=True, include_curve_outputs=log_predictions)
         tracker.json(run_id, folder, "metadata.json", result.metadata)
         tracker.report(run_id, folder, "validation", result.validation_report)
         selected_id = result.metadata["selected_trial_id"]

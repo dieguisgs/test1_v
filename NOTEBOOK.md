@@ -11,6 +11,19 @@ To **run and track parameter experiments**, use the separate
 That notebook loads inputs and writes experiment reports; this page describes only the
 saved-curve viewer above.
 
+The experiment notebook now embeds the same three chart views for **saved MLflow trials**.
+Choose experiment → parent run → trial → calibration/validation, then load the stored curve
+artifact. It supports all saved contract kinds/tenors and can open previous runs without
+rerunning the filler. Calibration curves are saved per trial; validation curves belong only
+to the winner. Full curves keep visible originals, so assess prediction accuracy from the
+held-out metrics, not from originals reproduced in these charts. Logging must have been
+enabled when the run was created; missing old artifacts are never recomputed using current
+inputs. See [saved experiment curves](MLFLOW.md#saved-curves) for controls and artifact paths.
+To browse saved runs independently, execute only section 1's editable settings cell and
+section 8's viewer cell in `backtest_mlflow.ipynb`. No dataset preparation, real input/EEX
+files or new tuning run is required; the viewer starts/reuses the local tracking service.
+Its artifact downloads are temporary and removed after loading.
+
 ## Start on this or another computer
 
 Copy the repository and the output CSV you want to inspect. Python 3.11 or later is required.

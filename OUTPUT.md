@@ -415,7 +415,7 @@ Season/quarters and Year/quarters; shape's internal Year/months penalty is detai
 
 `pipeline_configured` backtest predictions include the configured shape layer after hiding
 the held-out period. Diagnostic `local_*`/`hist_*` branches need not include it.
-Tune does not add shape grid dimensions; it stores the fixed shape configuration in its
+CLI tune does not add shape grid dimensions; it stores the fixed shape configuration in its
 snapshot. Full behavior and controls: [SHAPE.md](SHAPE.md).
 
 ### Aggregate tolerance diagnostics
@@ -423,3 +423,26 @@ snapshot. Full behavior and controls: [SHAPE.md](SHAPE.md).
 `shape.coherence_tolerance` defaults to 0.01 in the row's price unit and changes diagnostics only. Aggregate entries in `shape_trace.constraints` add `within_tolerance_before` and `within_tolerance_after` booleans. The trace adds `coherence_within_tolerance_before` and `coherence_within_tolerance_after`, booleans across applicable aggregates or null when none exist. In audit, “after” refers to the proposal. The flags `shape_coherence_outside_tolerance` (adjust) and `shape_proposal_outside_coherence_tolerance` (audit) identify nodes in a relation outside the margin. An outside-tolerance result can be a valid bounded soft-penalty solution; no guarantee of exact or near equality is implied.
 
 The comparison uses `abs(residual) <= coherence_tolerance + 1e-10` to allow numerical rounding.
+
+## MLflow experiment artifacts
+
+The experiment notebook stores artifacts in the selected MLflow run, separately from the
+production files under `[paths].output_dir`. Each candidate has a child run:
+
+| Child artifact | When saved | Schema and purpose |
+|---|---|---|
+| `curves/calibration_filled.csv` | Every completed calibration engine stage, with logging enabled | The same filled schema: **35 base columns**, plus **11 shape columns** when active (46 total). Full curves with visible own observations for visual inspection. |
+| `curves/validation_filled.csv` | Selected candidate's completed validation stage only, with logging enabled | The same filled schema, for the reserved validation interval. Losing candidates have no validation curve artifact. |
+| `predictions/calibration_paired_predictions.csv` | When individual prediction logging is enabled | Paired hidden-own truth, model/EEX predictions, errors, case keys and EEX availability metadata; not a full filled-curve CSV. |
+| `predictions/validation_paired_predictions.csv` | Selected candidate only, when enabled | The winner's paired held-out validation cases; not its full visible-original curve. |
+
+Full curve artifacts exclude warmup output and cover the stage's date interval. They may
+contain dates/targets that are not individual LOO cases. They retain visible originals:
+**use paired predictions and metrics for accuracy, and full curves for shape/coherence**.
+An existing stage artifact does not imply every later part of its run succeeded.
+
+`LOG_PREDICTIONS=False` writes neither paired-prediction CSVs nor full-curve CSVs. Aggregate
+CSV reports and JSON configuration/audit metadata are still saved. Old runs without full
+curves are reported as unavailable; the viewer does not reconstruct them using current data.
+See the [MLflow artifact and viewer guide](MLFLOW.md#saved-curves) for browsing, download
+locations, stage selection and independent access to saved experiments.

@@ -2606,11 +2606,31 @@ Los originales de fechas anteriores pueden seguir actualizando el histórico par
 posteriores. El ejemplo del notebook reserva cinco fechas; el CLI mantiene veinte por defecto.
 
 El registro crea una ejecución padre y sus hijas candidatas, guardando configuración, grid,
-fechas, huellas de datos, procedencia del código e informes. `LOG_PREDICTIONS=False` omite los
-archivos individuales de predicciones, pero conserva agregados y metadatos. El servicio local
+fechas, huellas de datos, procedencia del código e informes. `LOG_PREDICTIONS=False` omite tanto
+predicciones individuales **como curvas completas**, pero conserva agregados y metadatos. El servicio local
 escucha en `127.0.0.1`. La configuración elegida es una propuesta: no cambia automáticamente
 el config ni publica curvas de producción. MLflow es opcional: el relleno habitual y el
 evaluador CLI no requieren ese servicio ni su grupo de dependencias.
+
+La selección da **prioridad a cobertura frente a precisión**; no mezcla ambas en una suma.
+Un caso adicional predicho puede ganar a una configuración más precisa. El denominador son
+propios elegibles ocultados con EEX, no todos los huecos reales. El peso igual por curva evita
+dominio por cantidad/moneda, pero da igual voto a curvas pequeñas y es sensible a errores EEX
+muy bajos. Propio 100, EEX 110 y estimación 106 ilustran un score 0.6 para una curva: se mide
+el error relativo al error de EEX contra tu verdad propia, no la cercanía a EEX. Con varias
+curvas, score 0.8 no implica reducir un 20% el MAE absoluto conjunto. Cero/cero se define como
+cociente 1; error distinto de cero dividido por cero da infinito. Un empate exacto elige el
+primer candidato. La validación posterior solo del ganador no elige parámetros. Forma,
+coherencia y saltos temporales no son términos directos del objetivo: revísalos por separado.
+Los ejemplos y contrapartidas están en [la guía de selección](MLFLOW.es.md#selection-explained)
+y [las notas de backtest](BACKTEST.es.md).
+
+El visor de experimentos lee `curves/calibration_filled.csv` de cada etapa de calibración
+terminada y `curves/validation_filled.csv` solo de la validación ganadora. Son curvas completas
+de las ejecuciones existentes, con originales visibles: **no las predicciones LOO ocultadas**
+que miden precisión. Permite ver todos los tenors guardados de una fecha, medias por rango y
+evolución de una entrega fija. Si faltan archivos en runs antiguos o se desactivó su registro,
+lo informa; nunca reconstruye una ejecución pasada con datos/configuración actuales.
 
 La demo sintética funciona sin input/EEX real y demuestra la ejecución, no la optimalidad
 con datos de mercado. Un grid de fallback puede empatar porque local/histórico resuelva todos

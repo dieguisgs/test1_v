@@ -77,6 +77,58 @@ least 22 eligible observation dates, including at least two calibration dates wi
 common to all candidates, and usable holdout EEX. The one-day M+1/Q+2 experiment cannot tune.
 Tune writes reports and a proposed configuration patch; it does not apply it automatically.
 
+### Read the selection rule as a decision, not a certificate
+
+For each hidden observation, the truth is its **own VWAP**. Both the model and the EEX
+benchmark are compared against that truth. A curve means the full identity
+`(product, region, unit)`, not a tenor family. On the shared prediction cases of **all**
+calibration candidates, first calculate each curve's model MAE and EEX MAE, divide them,
+then average the curve ratios with equal weight.
+
+If own is 100, EEX 110 and the prediction 106, the errors are 10 and 6: in a one-case,
+one-curve illustration the score is **0.6**, a 40% error reduction relative to EEX. The
+target answer is 100; matching EEX is not the objective. Across curves, score **0.8** is
+not necessarily a 20% reduction in pooled absolute MAE. For two equally sampled EUR/MWh
+curves with `(EEX MAE, model MAE)` of `(10, 6)` and `(1, 1)`, the score is 0.8, while pooled
+MAE falls from 5.5 to 3.5, a 36.4% reduction. Different units must not be pooled at all.
+When EEX MAE is zero, zero model MAE gives ratio 1; nonzero model MAE gives infinity.
+
+Before that score is considered, maximum calibration coverage wins. Candidate A with
+100/100 predictions outranks B with 99/100 even if B has lower common-case error. This
+prevents winning by abstaining on difficult cases, but one additional filled point can
+outweigh a large accuracy improvement. Cases outside the common prediction intersection
+affect coverage but not the common-case score. The denominator contains **eligible hidden
+own observations with EEX references**, not all unknown target prices in production.
+
+Equal curve weights avoid dominance by a large observation count and allow unitless
+cross-currency comparison. The tradeoff is equal voting power for sparse curves and
+sensitivity to tiny EEX baseline errors. Inspect per-unit absolute errors and sample sizes.
+An exact tie selects the first candidate in grid order. Only that winner is tested on later
+holdout dates; holdout errors do not choose the winner or update its selected parameters.
+
+**Smoothness, month/quarter coherence and changes across dates are not direct terms in the
+current ranking.** Shape can affect predictions and therefore error, but a visually cleaner
+curve or lower coherence residual is not separately rewarded. Inspect holdout results,
+contract families/horizons, coverage, large errors and shape before adopting a proposal.
+This evaluates the supplied grid and observed-price masking; it does not prove the best
+method for unavailable real prices. These limitations do not change the selection algorithm.
+
+### Saved full curves and held-out predictions answer different questions
+
+The [MLflow notebook](MLFLOW.md) can display saved full curves for every calibration trial
+and for the winner's validation stage. They retain the day's available own observations;
+**they are not LOO curves with the scored own observation removed**. Use those charts for
+shape, month/quarter differences, rollover behavior and temporal changes, and use held-out
+metrics/predictions for accuracy. Seeing an original price reproduced on a full-curve chart
+is not a successful prediction test.
+
+When `LOG_PREDICTIONS=True`, child runs store `curves/calibration_filled.csv` and, for the
+selected candidate, `curves/validation_filled.csv`, alongside paired prediction files.
+`False` omits both individual predictions and full curves. The viewer reads persisted
+artifacts, including older saved experiments, without recomputing them from current data.
+If an older run did not save full curves, create a new experiment to obtain them; a missing
+artifact is not reconstructed and passed off as that original run's output.
+
 ### EEX availability is a fixed evaluation scenario
 
 `eex.offset_days=0` permits publications through the reference date T; `-1` restricts them

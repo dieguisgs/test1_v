@@ -59,7 +59,7 @@ deliberately favors those model families; it is not a neutral market benchmark.
 | `MLFLOW_PORT` | Local service port, initially **5000**. |
 | `MLFLOW_STORAGE` | Local experiment storage, initially `output/mlflow`, relative to the project root. |
 | `EXPERIMENT_NAME` | Groups related MLflow runs. Keep the same name to compare reruns. |
-| `LOG_PREDICTIONS` | Whether to save detailed backtest prediction artifacts. These may contain own prices when using real data. |
+| `LOG_PREDICTIONS` | Save individual paired backtest predictions **and full curve snapshots per trial**. `False` omits both. Real-data artifacts can contain observed own prices. |
 | `PARAMETER_GRID` | Explicit lists of candidate parameter values, described below. |
 | `STOP_SERVER` | Final cell: `False` leaves the UI running. Set `True` and execute that cell to stop the managed service. |
 
@@ -203,6 +203,64 @@ set into part of your research. Reserve later untouched dates, or run a separate
 evaluation, before claiming real generalization. See [BACKTEST.md](BACKTEST.md) for the
 limits of masking observed prices when actual missing prices may have different liquidity.
 
+<a id="selection-explained"></a>
+
+### What “best” means, with numbers
+
+The question being answered is: **among this grid, which configuration fills the most
+EEX-evaluable hidden own observations, then best improves on EEX on a common test sample?**
+It is not “which curve looks smoothest?” or “which configuration is proven best for every
+unknown real price?”.
+
+For each hidden case, compare **both** the model and EEX against the same hidden own price:
+
+```text
+model absolute error = abs(model prediction - hidden own price)
+EEX absolute error   = abs(EEX reference - hidden own price)
+curve ratio = mean(model absolute errors) / mean(EEX absolute errors)
+score = mean(curve ratios), with one equal vote per (product, region, unit)
+```
+
+The means use the shared prediction cases from **all calibration candidates**. Average
+errors within each curve first, then divide; this is not an average of individual percentage
+price errors. If the hidden own price is 100, EEX is 110 and the model predicts 106, the
+absolute errors are 10 and 6. In a one-case, one-curve illustration, the score is **0.6**:
+the error is 60% of EEX's error, or a 40% reduction. The answer being recovered is 100, not 110.
+
+For several curves, a score of **0.8** does **not** necessarily mean a 20% reduction in pooled
+absolute MAE. Suppose two EUR/MWh curves have equal numbers of paired cases:
+
+| Curve | EEX MAE | Model MAE | Curve ratio |
+|---|---:|---:|---:|
+| A | 10 | 6 | 0.6 |
+| B | 1 | 1 | 1.0 |
+
+The score is `(0.6+1.0)/2 = 0.8`. Pooled MAE is 5.5 for EEX and 3.5 for the model, a **36.4%**
+reduction, not 20%. With different units, pooled absolute MAE is not meaningful at all.
+The implemented special case is: if a curve's EEX MAE is zero, model MAE zero gives ratio
+**1**; nonzero model MAE gives **infinity**. A nearly zero EEX error can make the ratio very
+sensitive even when the model's absolute error is small.
+
+Coverage is a **first decision**, not a small bonus inside the accuracy score. With a common
+100-case benchmark universe, a candidate predicting 100 can beat one predicting 99 even
+if the 99-case method has lower error on their common cases. This prevents winning merely
+by skipping hard cases, but it means one extra filled point can outweigh a large accuracy
+improvement. Coverage concerns eligible hidden **observations with an EEX reference**;
+it does not measure coverage of every genuinely unknown production gap.
+
+Equal weighting per curve prevents a curve with many observations from dominating by count
+and allows unitless comparison across currencies. It also gives a sparsely observed curve
+the same vote as a well-observed curve, and small EEX baseline errors can dominate ratios.
+Check sample sizes and absolute per-unit errors alongside the ranking. Exact ties select
+the first candidate in grid order; they do not establish a unique optimum.
+
+The later holdout is evaluated **only for the chosen candidate** and does not choose that
+candidate. Shape quality, month/quarter coherence, and temporal jumps are **not direct terms
+of the selection objective**. A shape setting can affect predictions and thereby accuracy,
+but a smaller coherence residual does not earn a separate reward. Inspect the holdout,
+contract families/horizons, and saved curve charts before accepting a proposal. These checks
+help assess the winner; they do not alter the implemented selection rule.
+
 ## 5. What appears in MLflow and the notebook
 
 The notebook starts the managed service on **`127.0.0.1`** and displays its clickable URL.
@@ -223,8 +281,8 @@ Artifacts include calibration/validation CSV reports, grid and configuration sna
 data fingerprints and code/environment provenance. Optional prediction files help audit
 individual errors. Fingerprints identify supplied data; they are not a copy of the input
 dataset or a substitute for preserving the actual data needed to reproduce a real run.
-`LOG_PREDICTIONS=False` omits individual paired price/prediction artifacts; aggregate reports
-and configuration/provenance metadata are still saved.
+`LOG_PREDICTIONS=False` omits individual paired price/prediction artifacts **and full curve
+snapshots**; aggregate reports and configuration/provenance metadata are still saved.
 
 This workflow uses a local service and local artifacts; it does not require an MLflow cloud
 account. Real-data artifacts can contain own prices and identifying labels. They remain in
@@ -253,8 +311,9 @@ and [MLflow Tracking guide](https://mlflow.org/docs/latest/ml/tracking/).
    `reports/calibration_report.csv` contains the full grid. **`audit/`** holds JSON records
    such as configuration, grid, split, selected parameters, fingerprints and provenance,
    depending on whether you opened the parent or a child. **`predictions/`** on child runs
-   holds individual paired observations/predictions when enabled. With
-   `LOG_PREDICTIONS=False`, those prediction files are not generated; reports and audit
+   holds individual paired observations/predictions when enabled. **`curves/`** holds full
+   saved curves for visual inspection. With `LOG_PREDICTIONS=False`, neither individual
+   prediction files nor full curve snapshots are generated; reports and audit
    metadata remain. The child tag `vwaps.predictions` records `enabled` or `disabled`.
 5. Read the selected child's validation coverage and score, then its per-unit errors. Unit
    metric names use a sanitized label plus a hash; `audit/*_metric_states.json` maps them
@@ -263,6 +322,57 @@ and [MLflow Tracking guide](https://mlflow.org/docs/latest/ml/tracking/).
 
 The notebook's sorted table remains the direct presentation of the selection policy. MLflow
 is useful for inspecting and comparing runs, but a UI sort does not itself select parameters.
+
+<a id="saved-curves"></a>
+
+### Inspect a saved candidate's curves
+
+The experiment notebook includes the same chart views as [the CSV viewer](NOTEBOOK.md),
+with selectors for a saved experiment, parent run, candidate and stage:
+
+**To reopen old runs without running a new backtest:** execute only the editable settings
+cell in **section 1**, then the saved-curve viewer cell in **section 8**. That viewer cell
+resolves the project/storage paths, starts or reuses the local MLflow service, and imports
+its own dependencies. Skip dataset preparation and the tuning cell: no original VWAP/EEX
+files, dataset object or previous `result` variable are needed. Set `PROJECT_ROOT`,
+`MLFLOW_STORAGE`, `MLFLOW_PORT` and `EXPERIMENT_NAME` for the saved experiment location.
+The optional stop cell in **section 9** also works after this independent browsing flow.
+
+1. In **Experiment:** enter the saved experiment name and click **Refresh runs**.
+2. Choose **Run:** and **Trial:**. Choose **Calibration (all trials)**, or
+   **Validation (selected trial only)** for the winning trial.
+3. Click **Load saved curves**. Use **Curve:**, **View:** and the tabs **Single date**,
+   **Range means**, **Fixed delivery evolution**. The full-curve view includes every saved
+   contract kind and tenor for that curve/date; it does not invent missing CSV rows.
+
+The browser reads the persisted run artifacts, using temporary downloads under
+`<MLFLOW_STORAGE>/viewer_cache` (default `output/mlflow/viewer_cache`). Downloaded files are
+removed after loading; this is not a persistent cache reused in place of the saved artifacts.
+It does not recalculate old results using today's configuration or files.
+The underlying artifacts are attached to each candidate's child run:
+
+| MLflow artifact | Availability | Meaning |
+|---|---|---|
+| `curves/calibration_filled.csv` | Every trial whose calibration engine stage completed, when logging is enabled | Full curves generated in that calibration date interval. |
+| `curves/validation_filled.csv` | Selected trial only, when its validation engine stage completed and logging is enabled | Full curves generated in the reserved validation interval. |
+| `predictions/calibration_paired_predictions.csv` | When individual prediction logging is enabled | Held-out prediction cases used to audit errors and coverage. |
+| `predictions/validation_paired_predictions.csv` | Selected trial only, when enabled | The winner's held-out validation cases. |
+
+**Full curve snapshots retain visible own observations. They are not the curves with each
+LOO observation hidden.** They show how that candidate fills a normal curve with its available
+originals. Use the held-out metrics/prediction files to assess accuracy; use the full curves
+to inspect shape, aggregate differences and changes across dates. Matching an original shown
+on a chart is not evidence of successful hidden-price prediction.
+
+Snapshots come from the existing stage engine calls, exclude warmup output, and cover the
+stage's first-to-last evaluation date interval. They can include generated dates/targets
+outside the individual LOO case list. A stage artifact can survive if a later step fails,
+so inspect run status and reports before treating a run as complete.
+
+Old runs without curve artifacts, runs with `LOG_PREDICTIONS=False`, and a losing candidate's
+validation stage cannot display full curves. The browser explains what is missing. To obtain
+them, run a **new** experiment with logging enabled; it never silently reconstructs a past
+experiment using current data. The artifact files can be downloaded from MLflow as CSVs too.
 
 ## 6. Move to the computer with real data
 
@@ -310,8 +420,8 @@ Keep enough earlier history for the methods you want to compare.
 
 ## 8. Verified execution
 
-On Windows with Python **3.14.2** and MLflow **3.17.0**, the complete suite passed **715 tests**
-in 44.70 seconds, with one upstream MLflow/SQLAlchemy deprecation warning. The notebook was
+On Windows with Python **3.14.2** and MLflow **3.17.0**, the complete suite passed **751 tests**
+in 51.34 seconds, with one upstream MLflow/SQLAlchemy deprecation warning. The notebook was
 executed through the actual `.venv` Jupyter kernel with both the default offset **0** and an
 explicit offset **-1**. The -1 run completed all six candidate children under one parent,
 with **25 calibration dates / 290 paired cases** and **5 validation dates / 58 cases** for
@@ -321,6 +431,18 @@ accepted publication satisfied **`eex_asof <= eex_cutoff_date = T - 1 calendar d
 The offset -1 execution also verified an HTTP 200 response from the local UI and clean
 service shutdown. Earlier default-offset checks verified report artifact upload/download
 and retention of experiment records after stopping/restarting the service.
+
+The saved-curve viewer was then exercised through the actual notebook/kernel and local
+service at offset -1. Each of six trials saved **300 full calibration rows**; only the
+winner saved **60 full validation rows**. These full curves are separate from the held-out
+case counts above. Checks switched between a nonwinner's calibration and the winner's
+validation, full-curve/Month/Quarter views, and the three chart tabs.
+
+The independent viewer was rerun after removing `dataset` and `result` and pointing input
+and config paths at missing files. The engine's `run` method was patched to fail if called:
+the saved curves still loaded with **zero engine reruns**. The UI returned HTTP 200 and the
+managed service stopped cleanly. This confirms inspection of persisted artifacts without
+loading the original data or silently recreating an experiment.
 
 These checks establish the tested local workflow, not predictive accuracy on unavailable
 real own data, the optimality of synthetic winning parameters, or runtime verification on

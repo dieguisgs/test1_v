@@ -230,6 +230,7 @@ def tune_parameters(
     start: date, end: date, parameter_grid: dict[str, list], validation_days: int, max_trials: int,
     *, observer: Callable[[str, dict], None] | None = None,
     extended_grid: bool = False,
+    include_curve_outputs: bool = False,
 ) -> TuneResult:
     """Choose on calibration dates only, then evaluate just the winner later.
 
@@ -246,6 +247,11 @@ def tune_parameters(
     Calibration scores are emitted only after the common comparison sample is
     final. Observer failures propagate; they never silently alter selection or
     produce an apparently complete tracked experiment.
+    With ``include_curve_outputs=True``, the observer additionally receives a
+    ``curves_evaluated`` event for each completed engine call, containing its
+    stage, trial ID and copied full ``filled`` output. These curves retain
+    observed originals; they are not the withheld predictions used to score
+    accuracy. No additional engine run or holdout candidate is evaluated.
     ``extended_grid=True`` additionally admits the explicitly listed safe
     experiment controls. Observation filters, identities, calendars, targets
     and staleness limits remain fixed, and every trial must retain the same
@@ -261,6 +267,8 @@ def tune_parameters(
         raise ValueError("Tuning requires run.warmup_days = 0 to replay all supplied original history")
     if isinstance(validation_days, bool) or not isinstance(validation_days, int) or validation_days < 1:
         raise ValueError("validation_days must be a positive integer")
+    if not isinstance(include_curve_outputs, bool):
+        raise ValueError("include_curve_outputs must be a boolean")
     candidates = _candidates(cfg, parameter_grid, max_trials, extended_grid=extended_grid)
     dates = _observation_dates(cfg, vw, maps, start, end)
     if len(dates) < validation_days + 2:
@@ -273,7 +281,7 @@ def tune_parameters(
     baseline = None
     common_mask = None
 
-    def evaluate(parameters: dict, days: list[date], label: str) -> pd.DataFrame:
+    def evaluate(parameters: dict, days: list[date], label: str, *, trial_id: int, stage: str) -> pd.DataFrame:
         candidate_cfg = replace(cfg, **parameters)
         try:
             result = CurveFiller(candidate_cfg, vw, maps, books).run(days[0], days[-1], loo=True)
@@ -281,11 +289,14 @@ def tune_parameters(
             raise ValueError(f"{label} failed: {exc}") from exc
         if result.errors:
             raise ValueError(f"{label} failed with {len(result.errors)} engine errors; no partial tuning result")
+        if include_curve_outputs and observer is not None:
+            notify("curves_evaluated", trial_id=trial_id, stage=stage, filled=result.filled)
         return _paired(result.loo, days, label)
 
     for trial_id, parameters in enumerate(candidates, 1):
         notify("trial_started", trial_id=trial_id, parameters=parameters)
-        available = evaluate(parameters, calibration_dates, f"Calibration trial {trial_id}")
+        available = evaluate(parameters, calibration_dates, f"Calibration trial {trial_id}",
+                             trial_id=trial_id, stage="calibration")
         notify("calibration_evaluated", trial_id=trial_id, parameters=parameters, available=available)
         trace = [name for name in EEX_POLICY_COLUMNS if name in available]
         evidence = available[[*PAIR_KEYS, "own", "eex_pred", *trace]].set_index(PAIR_KEYS).sort_index()
@@ -324,7 +335,8 @@ def tune_parameters(
     notify("calibration_complete", selected_trial_id=selected_trial,
            selected_config=selected, report=calibration_report)
     notify("validation_started", trial_id=selected_trial, parameters=selected)
-    validation_available = evaluate(selected, holdout_dates, f"Validation of trial {selected_trial}")
+    validation_available = evaluate(selected, holdout_dates, f"Validation of trial {selected_trial}",
+                                    trial_id=selected_trial, stage="validation")
     validation = validation_available[validation_available["model_pred"].notna()]
     validation_report = _report(validation, validation_available, selected_trial, selected, holdout_dates)
     validation_report["selected"] = True

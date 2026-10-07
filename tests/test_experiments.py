@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import date
+from io import BytesIO, StringIO
 import json
 import math
 import os
@@ -106,11 +107,14 @@ def test_tracking_matches_real_engine_selection_reports_and_single_holdout(datas
     plain = tune_parameters(cfg, own, maps, books, days[0], days[-1],
                             {"basis_mode": ["auto", "ratio", "additive"]}, 2, 20)
     calls = []
+    computed = []
     original = CurveFiller.run
 
     def count(self, start, end, loo=False):
         calls.append((self.cfg.basis_mode, start, end))
-        return original(self, start, end, loo=loo)
+        result = original(self, start, end, loo=loo)
+        computed.append(result.filled.copy(deep=True))
+        return result
 
     monkeypatch.setattr(CurveFiller, "run", count)
     tracked = _run(dataset, tmp_path)
@@ -129,6 +133,20 @@ def test_tracking_matches_real_engine_selection_reports_and_single_holdout(datas
     assert all(child["tags"]["mlflow.parentRunId"] == tracked.run_id for child in children)
     assert all(run["params"]["eex_offset_days"] == "0" for run in tracking.runs.values())
     assert all(("predictions", "calibration_paired_predictions.csv") in child["artifacts"] for child in children)
+    assert all(run["tags"]["vwaps.curve_outputs"] == "enabled" for run in tracking.runs.values())
+    winner = plain.metadata["selected_trial_id"]
+    for number, child in enumerate(children, 1):
+        artifact = child["artifacts"]["curves", "calibration_filled.csv"]
+        saved = pd.read_csv(BytesIO(artifact))
+        expected = pd.read_csv(StringIO(computed[number - 1].to_csv(index=False)))
+        pd.testing.assert_frame_equal(saved, expected)
+        assert (tracked.output_dir / f"trial_{number:03d}" / "calibration_filled.csv").read_bytes() == artifact
+        assert saved.reference_date.max() <= days[-3].isoformat()
+        assert (("curves", "validation_filled.csv") in child["artifacts"]) == (number == winner)
+    heldout = pd.read_csv(BytesIO(children[winner - 1]["artifacts"]["curves", "validation_filled.csv"]))
+    pd.testing.assert_frame_equal(heldout, pd.read_csv(StringIO(computed[-1].to_csv(index=False))))
+    assert set(heldout.reference_date) == {day.isoformat() for day in days[-2:]}
+    assert children[winner - 1]["tags"]["vwaps.curve_outputs_kind"] == "full_refill_with_originals"
     assert tracked.run_url == f"http://127.0.0.1:5000/#/experiments/7/runs/{tracked.run_id}"
     assert tracked.output_dir.name == tracked.run_id
 
@@ -149,9 +167,60 @@ def test_absolute_errors_are_logged_only_per_unit_and_units_never_collide(datase
 def test_prediction_opt_out_writes_and_uploads_no_price_level_prediction_files(dataset, tmp_path, tracking):
     tracked = _run(dataset, tmp_path, log_predictions=False)
     assert not list(tracked.output_dir.rglob("*paired_predictions*"))
-    assert not any(path == "predictions" for run in tracking.runs.values() for path, _ in run["artifacts"])
+    assert not list(tracked.output_dir.rglob("*_filled.csv"))
+    assert not any(path in ("predictions", "curves") for run in tracking.runs.values() for path, _ in run["artifacts"])
+    assert all(run["tags"]["vwaps.curve_outputs"] == "disabled" for run in tracking.runs.values())
     assert (tracked.output_dir / "calibration_report.csv").is_file()
     assert (tracked.output_dir / "metadata.json").is_file()
+
+
+def test_full_curves_include_observed_originals_filled_gaps_and_days_without_observations(dataset, tmp_path, tracking):
+    cfg, own, maps, books, days = dataset
+    own = own.loc[~(own.date.eq(days[0]) & own.tenor.eq("M+2")) & ~own.date.eq(days[1])].copy()
+    tracked = _run((cfg, own, maps, books, days), tmp_path, grid={"basis_mode": ["ratio"]})
+    child = tracking.runs["run0002"]
+    full = pd.read_csv(BytesIO(child["artifacts"]["curves", "calibration_filled.csv"]))
+    original = full.loc[full.reference_date.eq(str(days[0])) & full.tenor.eq("M+1") & full.unit.eq("EUR/MWh")].iloc[0]
+    assert original.price == original.own_vwap == 110.0
+    assert original.source == "own" and original.data_origin == "original"
+    estimated = full.loc[full.reference_date.eq(str(days[0])) & full.tenor.eq("M+2")]
+    assert len(estimated) == 2 and estimated.price.notna().all()
+    assert estimated.data_origin.eq("estimated").all()
+    assert str(days[1]) in set(full.reference_date)  # No LOO truth exists on this weekday.
+    paired = pd.read_csv(BytesIO(child["artifacts"]["predictions", "calibration_paired_predictions.csv"]))
+    assert str(days[1]) not in set(paired.reference_date)
+    common = full.merge(paired, on=["reference_date", "product", "region", "unit", "tenor"])
+    assert (common.loc[common.model_pred.notna(), "price"] != common.loc[common.model_pred.notna(), "model_pred"]).any()
+    assert full.reference_date.max() < tracked.tuning.metadata["validation_start"]
+
+
+def test_curve_opt_out_does_not_request_full_output_from_the_tuner(dataset, tmp_path, tracking, monkeypatch):
+    original = CurveFiller.run
+
+    def without_filled(self, start, end, loo=False):
+        result = original(self, start, end, loo=loo)
+        return SimpleNamespace(errors=result.errors, loo=result.loo)
+
+    monkeypatch.setattr(CurveFiller, "run", without_filled)
+    tracked = _run(dataset, tmp_path, grid={"basis_mode": ["ratio"]}, log_predictions=False)
+    assert tracked.tuning.metadata["n_trials"] == 1
+    assert not list(tracked.output_dir.rglob("*_filled.csv"))
+
+
+def test_curve_upload_failure_preserves_local_curves_and_marks_run_failed(dataset, tmp_path, tracking, monkeypatch):
+    original = tracking.log_artifact
+
+    def fail_curve(run_id, path, artifact_path=None):
+        if artifact_path == "curves":
+            raise RuntimeError("curve artifact upload failed")
+        return original(run_id, path, artifact_path)
+
+    monkeypatch.setattr(tracking, "log_artifact", fail_curve)
+    with pytest.raises(RuntimeError, match="curve artifact upload failed"):
+        _run(dataset, tmp_path)
+    assert {run["status"] for run in tracking.runs.values()} == {"FAILED"}
+    assert (tmp_path / "tracked" / "run0001" / "trial_001" / "calibration_filled.csv").is_file()
+    assert not list((tmp_path / "tracked").rglob("validation_filled.csv"))
 
 
 def test_each_invocation_has_an_independent_parent_directory(dataset, tmp_path, tracking):
@@ -193,11 +262,18 @@ def _fake_loo(start, end, *, omit_predictions=False):
     return pd.DataFrame(rows)
 
 
+def _fake_filled(start, end):
+    """Represent full observed refill rows separately from fake LOO scores."""
+    frame = _fake_loo(start, end).query("method == 'eex'").drop(columns=["method", "pred"])
+    return frame.rename(columns={"own": "price"}).assign(source="own", data_origin="original")
+
+
 def test_holdout_abstention_logs_zero_coverage_but_no_invented_error_score(dataset, tmp_path, tracking, monkeypatch):
     days = dataset[-1]
 
     def missing_holdout(self, start, end, loo=False):
-        return SimpleNamespace(errors=[], loo=_fake_loo(start, end, omit_predictions=start == days[-2]))
+        return SimpleNamespace(errors=[], loo=_fake_loo(start, end, omit_predictions=start == days[-2]),
+                               filled=_fake_filled(start, end))
 
     monkeypatch.setattr(CurveFiller, "run", missing_holdout)
     tracked = _run(dataset, tmp_path, grid={"basis_mode": ["auto"]})
@@ -216,7 +292,7 @@ def test_infinite_baseline_relative_score_retains_its_state(dataset, tmp_path, t
     def perfect_baseline(self, start, end, loo=False):
         rows = _fake_loo(start, end)
         rows.loc[rows.method.eq("eex"), "pred"] = 100.0
-        return SimpleNamespace(errors=[], loo=rows)
+        return SimpleNamespace(errors=[], loo=rows, filled=_fake_filled(start, end))
 
     monkeypatch.setattr(CurveFiller, "run", perfect_baseline)
     tracked = _run(dataset, tmp_path, grid={"basis_mode": ["auto"]})
@@ -240,6 +316,8 @@ def test_later_trial_failure_keeps_earlier_artifacts_and_terminates_open_runs(da
     assert {run["status"] for run in tracking.runs.values()} == {"FAILED"}
     first = tracking.runs["run0002"]
     assert ("predictions", "calibration_paired_predictions.csv") in first["artifacts"]
+    assert ("curves", "calibration_filled.csv") in first["artifacts"]
+    assert ("curves", "validation_filled.csv") not in first["artifacts"]
     assert not first["metrics"]  # The common comparison sample was never finalized.
     assert (tmp_path / "tracked" / "run0001" / "failure.json").is_file()
 
@@ -315,7 +393,8 @@ def test_failed_finalization_corrects_uploaded_manifest_and_preserves_primary_er
     assert {run["status"] for run in tracking.runs.values()} == {"FAILED"}
 
 
-def test_observer_payload_mutation_cannot_change_selection_or_scores(dataset):
+@pytest.mark.parametrize("include_curves", [False, True])
+def test_observer_payload_mutation_cannot_change_selection_or_scores(dataset, include_curves):
     cfg, own, maps, books, days = dataset
     args = (cfg, own, maps, books, days[0], days[-1], {"basis_mode": ["auto", "additive"]}, 2, 20)
     plain = tune_parameters(*args)
@@ -329,13 +408,16 @@ def test_observer_payload_mutation_cannot_change_selection_or_scores(dataset):
             payload["available"]["model_pred"] = 1e9
         if "report" in payload:
             payload["report"]["score"] = -1e9
+        if "filled" in payload:
+            payload["filled"]["price"] = 1e9
 
-    observed = tune_parameters(*args, observer=mutate)
+    observed = tune_parameters(*args, observer=mutate, include_curve_outputs=include_curves)
     assert observed.selected_config == plain.selected_config
     assert observed.metadata == plain.metadata
     pd.testing.assert_frame_equal(observed.calibration_report, plain.calibration_report)
     assert events.index("calibration_scored") > max(i for i, event in enumerate(events) if event == "calibration_evaluated")
     assert events.count("validation_started") == events.count("validation_scored") == 1
+    assert events.count("curves_evaluated") == (3 if include_curves else 0)
 
 
 def test_fingerprints_describe_actual_evidence_even_when_configured_files_are_absent(dataset):
@@ -394,17 +476,29 @@ def test_extended_layer_switch_changes_real_engine_coverage_and_is_ranked_honest
     assert tracked.tuning.selected_config["layer_local"] is True
 
 
-def test_real_mlflow_sqlite_tracks_runs_without_changing_active_global_context(dataset, tmp_path):
+@pytest.mark.parametrize("log_predictions", [False, True])
+def test_real_mlflow_sqlite_tracks_runs_without_changing_active_global_context(dataset, tmp_path, log_predictions):
     mlflow = pytest.importorskip("mlflow")
+    from vwaps.experiment_viewer import list_experiment_runs, list_trial_runs, load_trial_curves
     active_before = mlflow.active_run()
     tracking_before = mlflow.get_tracking_uri()
     uri = "sqlite:///" + (tmp_path / "tracking.db").as_posix()
-    tracked = _run(dataset, tmp_path, tracking_uri=uri, grid={"basis_mode": ["additive"]}, log_predictions=False)
+    tracked = _run(dataset, tmp_path, tracking_uri=uri, grid={"basis_mode": ["additive"]},
+                   log_predictions=log_predictions)
     client = mlflow.MlflowClient(tracking_uri=uri)
     parent = client.get_run(tracked.run_id)
     assert parent.info.status == "FINISHED"
     assert parent.data.metrics["validation.overall.coverage"] == 1.0
     children = client.search_runs([tracked.experiment_id], f"tags.`mlflow.parentRunId` = '{tracked.run_id}'")
     assert len(children) == 1 and children[0].info.status == "FINISHED"
+    assert list_experiment_runs(uri, "test").run_id.tolist() == [tracked.run_id]
+    trials = list_trial_runs(uri, tracked.run_id)
+    assert bool(trials.iloc[0].calibration_curves) == log_predictions
+    assert bool(trials.iloc[0].validation_curves) == log_predictions
+    if log_predictions:
+        saved = load_trial_curves(uri, tracked.run_id, children[0].info.run_id,
+                                  "calibration", cache_dir=tmp_path / "viewer")
+        assert not saved.empty and saved.source.eq("own").all()
+        assert saved.reference_date.max().date() < dataset[-1][-2]
     assert mlflow.active_run() is active_before
     assert mlflow.get_tracking_uri() == tracking_before

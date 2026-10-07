@@ -2577,11 +2577,30 @@ Earlier observed originals can still update the history used for later dates. Th
 example reserves five dates; the CLI default remains twenty.
 
 Tracking creates one parent run and candidate children, with configuration, grid, date split,
-data fingerprints, code provenance and reports. Optional individual prediction files are
-omitted with `LOG_PREDICTIONS=False`; aggregate reports and audit metadata remain. The local
+data fingerprints, code provenance and reports. Optional individual predictions **and full
+curve snapshots** are omitted with `LOG_PREDICTIONS=False`; aggregates and audit metadata remain. The local
 service listens on `127.0.0.1`. The selected configuration is a proposal: no automatic config
 change or publication of production curves occurs. MLflow is optional; ordinary filling and
 the CLI evaluator do not require this service or dependency group.
+
+The selection policy gives **coverage priority over accuracy**, not a combined weighted
+score. One additional predicted case can outrank a more accurate candidate. The denominator
+is eligible hidden own observations with EEX, not every real unknown gap. Equal curve weighting
+avoids count/currency dominance but gives sparse curves equal votes and is sensitive to tiny
+EEX baseline errors. An own price 100, EEX 110 and estimate 106 illustrates a one-curve score
+of 0.6; it measures error relative to EEX's error against own truth, not closeness to EEX.
+Across curves, score 0.8 need not mean 20% lower pooled absolute MAE. Zero/zero baseline error
+is defined as ratio 1; nonzero/zero gives infinity. Exact ties select the first grid candidate.
+The later winner-only holdout does not select parameters. Shape/coherence and temporal jumps
+are not direct objective terms; inspect them separately. Worked examples and tradeoffs are in
+[the selection guide](MLFLOW.md#selection-explained) and [backtest notes](BACKTEST.md).
+
+The experiment browser reads saved child artifacts `curves/calibration_filled.csv` for every
+completed calibration stage and `curves/validation_filled.csv` only for the winner's validation.
+These are full curves from existing engine calls, with visible originals retained, **not
+the masked LOO predictions** used for accuracy. View all saved tenors at one date, range means
+or fixed-delivery evolution to inspect shape. Missing artifacts on old runs or disabled logging
+are reported; the browser never recreates a past run with current data/configuration.
 
 The default synthetic demo runs without real input/EEX files and demonstrates execution, not
 real-market optimality. A fallback grid can tie because local/history already fills every

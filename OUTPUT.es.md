@@ -413,7 +413,7 @@ sus comparaciones Quarter/meses, Season/trimestres y Year/trimestres. La penaliz
 Year/meses de shape está en `shape_trace` y no tiene por qué coincidir con esa comparación.
 
 Las predicciones `pipeline_configured` incluyen shape tras ocultar el periodo evaluado.
-Los diagnósticos `local_*`/`hist_*` no necesariamente la incluyen. Tune no añade dimensiones
+Los diagnósticos `local_*`/`hist_*` no necesariamente la incluyen. Tune por CLI no añade dimensiones
 de shape: guarda sus valores fijos en el snapshot. [SHAPE.es.md](SHAPE.es.md) detalla reglas
 y controles.
 
@@ -422,3 +422,26 @@ y controles.
 `shape.coherence_tolerance` empieza en 0.01 en la unidad de la fila y solo cambia diagnósticos. Los agregados de `shape_trace.constraints` añaden los booleanos `within_tolerance_before` y `within_tolerance_after`. La traza añade `coherence_within_tolerance_before` y `coherence_within_tolerance_after`: booleanos para todos los agregados aplicables o null si no hay ninguno. En audit, “after” es la propuesta. Los flags `shape_coherence_outside_tolerance` (adjust) y `shape_proposal_outside_coherence_tolerance` (audit) señalan nodos de una relación fuera del margen. Estar fuera puede ser una solución válida con límites y penalizaciones suaves; no garantiza igualdad exacta ni aproximada.
 
 La comparación usa `abs(residual) <= coherence_tolerance + 1e-10` para admitir redondeo numérico.
+
+## Archivos de experimentos MLflow
+
+El notebook guarda estos archivos en la ejecución MLflow seleccionada, separados de los
+outputs de producción de `[paths].output_dir`. Cada candidato tiene una ejecución hija:
+
+| Archivo de la hija | Cuándo se guarda | Esquema y finalidad |
+|---|---|---|
+| `curves/calibration_filled.csv` | Cada etapa de motor de calibración completada, con registro activo | El mismo esquema filled: **35 columnas base** más **11 de shape** si está activa (46 total). Curvas completas con originales visibles para revisión gráfica. |
+| `curves/validation_filled.csv` | Solo etapa de validación completada del ganador, con registro activo | El mismo esquema filled, para el intervalo reservado. Los candidatos perdedores no tienen curva de validación. |
+| `predictions/calibration_paired_predictions.csv` | Si se activa el registro individual | Verdad propia ocultada, predicciones modelo/EEX, errores, claves y metadatos de disponibilidad EEX; no es un CSV filled de curva completa. |
+| `predictions/validation_paired_predictions.csv` | Solo el ganador, si se activa | Casos de validación ocultados y emparejados, no la curva con sus propios visibles. |
+
+Las curvas completas excluyen el output de calentamiento y cubren el intervalo de la etapa.
+Pueden contener fechas/targets que no sean casos individuales de LOO. Mantienen originales
+visibles: **mide precisión con predicciones emparejadas/métricas y revisa forma/coherencia
+con las curvas completas**. Que exista un archivo de etapa no demuestra que todo el run terminase bien.
+
+`LOG_PREDICTIONS=False` no guarda CSVs de predicciones emparejadas ni de curvas completas.
+Sí conserva informes CSV agregados y JSON de configuración/auditoría. Si un run antiguo no
+tiene curvas, se informa de su ausencia; el visor no las reconstruye con datos actuales.
+La [guía de archivos y visor MLflow](MLFLOW.es.md#saved-curves) detalla navegación, descargas,
+selección de etapas y acceso independiente a experimentos guardados.

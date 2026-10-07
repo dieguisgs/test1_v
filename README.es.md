@@ -44,6 +44,13 @@ al config ni a las curvas de producción.
 Ambos notebooks, incluidas sus explicaciones, código y textos de interfaz, están íntegramente
 en inglés. La documentación Markdown independiente está disponible en inglés y español.
 
+El notebook de experimentos también [abre curvas guardadas por run, candidato y etapa](MLFLOW.es.md#saved-curves),
+con las mismas vistas de curva completa, medias por rango y evolución de una entrega.
+Con `LOG_PREDICTIONS=True`, todos los candidatos guardan curvas de calibración y solo el
+ganador guarda las de validación. Conservan originales visibles: la precisión se mide con
+los ocultados. [La explicación del criterio](MLFLOW.es.md#selection-explained) aclara por qué
+manda la cobertura, cómo se promedia el error modelo/EEX por curva y por qué la forma se revisa aparte.
+
 ## Instalación
 
 Requiere Python 3.11 o posterior. Desde la carpeta del proyecto, utiliza una de estas opciones:

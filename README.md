@@ -44,6 +44,13 @@ applying them to the config or production curves.
 Both notebooks, including their explanations, code and interface text, are entirely in
 English. The standalone Markdown documentation is available in English and Spanish.
 
+The experiment notebook also [opens saved curves by run, candidate and stage](MLFLOW.md#saved-curves),
+using the same full-curve, range-mean and fixed-delivery views as the output viewer. With
+`LOG_PREDICTIONS=True`, every calibration trial saves full curves and only the winner saves
+validation curves. These retain visible originals; use held-out metrics for accuracy.
+[The selection explanation](MLFLOW.md#selection-explained) shows why maximum coverage comes
+first, how the equal-curve model/EEX error score works, and why shape is reviewed separately.
+
 ## Install
 
 Requires Python 3.11 or later. From the project directory, use either:

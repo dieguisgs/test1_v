@@ -11,6 +11,19 @@ Para **ejecutar y registrar experimentos de parámetros**, utiliza el otro
 Ese notebook carga inputs y guarda informes de experimentos; esta página describe únicamente
 el visor de curvas ya guardadas.
 
+El notebook de experimentos incorpora esas mismas tres vistas para **candidatos guardados
+en MLflow**. Elige experimento → ejecución padre → candidato → calibración/validación y carga
+la curva guardada. Admite todos los tipos/tenors guardados y abre runs anteriores sin repetir
+el relleno. Cada candidato guarda calibración; solo el ganador guarda validación. Las curvas
+mantienen originales visibles: evalúa precisión con métricas ocultadas, no con originales
+reproducidos en el gráfico. El registro debía estar activo al crear el run; no se recalculan
+archivos antiguos ausentes con inputs actuales. [La guía del visor de experimentos](MLFLOW.es.md#saved-curves)
+detalla controles y rutas de los archivos.
+Para consultar runs de forma independiente, ejecuta solo la celda editable de ajustes de
+la sección 1 y la celda del visor de la sección 8 de `backtest_mlflow.ipynb`. No necesita
+preparar el dataset, disponer de input/EEX real ni ejecutar otro tuning: el visor arranca
+o reutiliza el servicio local. Sus descargas son temporales y se eliminan tras cargarse.
+
 ## Arrancar en este u otro ordenador
 
 Copia el repositorio y el CSV que quieras consultar. Se necesita Python 3.11 o posterior.

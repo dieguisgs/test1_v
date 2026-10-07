@@ -59,7 +59,7 @@ modelos; no es un benchmark de mercado neutral.
 | `MLFLOW_PORT` | Puerto del servicio local, inicialmente **5000**. |
 | `MLFLOW_STORAGE` | Carpeta local de experimentos, inicialmente `output/mlflow`, relativa a la raíz del proyecto. |
 | `EXPERIMENT_NAME` | Agrupa ejecuciones relacionadas en MLflow. Mantén el nombre para comparar nuevas ejecuciones. |
-| `LOG_PREDICTIONS` | Guarda o no los detalles de predicciones del backtest. Con datos reales pueden contener precios propios. |
+| `LOG_PREDICTIONS` | Guarda predicciones individuales emparejadas **y curvas completas por candidato**. `False` omite ambas. Con datos reales pueden contener precios propios observados. |
 | `PARAMETER_GRID` | Listas explícitas de valores candidatos, explicadas debajo. |
 | `STOP_SERVER` | Última celda: `False` mantiene abierta la interfaz. Pon `True` y ejecuta esa celda para detener el servicio gestionado. |
 
@@ -206,6 +206,65 @@ formar parte de tu investigación. Reserva fechas posteriores intactas o usa una
 temporal separada antes de afirmar que generaliza. [BACKTEST.es.md](BACKTEST.es.md) explica
 por qué ocultar conocidos es útil y también sus límites si los huecos reales tienen otra liquidez.
 
+<a id="selection-explained"></a>
+
+### Qué significa «mejor», con números
+
+La pregunta que se responde es: **entre este grid, ¿qué configuración rellena más propios
+ocultados evaluables con EEX y, después, mejora más frente a EEX en una muestra común?**
+No es «¿qué curva parece más suave?» ni «¿cuál está demostrado que acierta mejor todos los
+precios reales desconocidos?».
+
+Para cada caso ocultado, se comparan **modelo y EEX** con el mismo propio oculto:
+
+```text
+model absolute error = abs(model prediction - hidden own price)
+EEX absolute error   = abs(EEX reference - hidden own price)
+curve ratio = mean(model absolute errors) / mean(EEX absolute errors)
+score = mean(curve ratios), with one equal vote per (product, region, unit)
+```
+
+Las medias usan los casos predichos por **todos los candidatos de calibración**. Primero
+se promedian errores dentro de cada curva y después se divide: no se promedian porcentajes
+de error de cada precio. Si el propio oculto es 100, EEX vale 110 y el modelo predice 106,
+los errores absolutos son 10 y 6. En este ejemplo de un caso y una curva, el score es **0.6**:
+el error es el 60% del error de EEX, una reducción del 40%. La respuesta buscada es 100, no 110.
+
+Con varias curvas, un score **0.8** no implica necesariamente reducir un 20% el MAE absoluto
+conjunto. Imagina dos curvas EUR/MWh con el mismo número de casos emparejados:
+
+| Curva | MAE EEX | MAE modelo | Cociente de la curva |
+|---|---:|---:|---:|
+| A | 10 | 6 | 0.6 |
+| B | 1 | 1 | 1.0 |
+
+El score es `(0.6+1.0)/2 = 0.8`. El MAE conjunto es 5.5 para EEX y 3.5 para el modelo:
+mejora un **36.4%**, no un 20%. Con unidades distintas ni siquiera tiene sentido mezclar
+esos errores absolutos. El caso especial implementado es: si EEX tiene MAE cero en una curva,
+modelo con MAE cero recibe cociente **1**, y modelo con MAE distinto de cero recibe **infinito**.
+Un error EEX casi cero puede hacer muy sensible el cociente aunque el error absoluto del
+modelo sea pequeño.
+
+La cobertura es una **decisión previa**, no un pequeño bonus dentro del score de precisión.
+Si el universo común tiene 100 casos, quien predice 100 puede ganar a quien predice 99 aunque
+el segundo tenga menor error en los casos comunes. Así no se gana solo por saltarse casos
+difíciles, pero un único punto adicional rellenado puede pesar más que una mejora grande de
+precisión. La cobertura se refiere a **propios elegibles ocultados con referencia EEX**, no
+a todos los huecos realmente desconocidos de producción.
+
+Dar igual peso a cada curva evita que una con muchas observaciones domine por cantidad y
+permite comparar sin mezclar monedas. También da el mismo voto a una curva con pocos datos
+que a otra con muchos, y un benchmark casi perfecto puede dominar los cocientes. Mira tamaño
+de muestra y errores absolutos por unidad junto al ranking. Un empate exacto elige el primer
+candidato del grid; no demuestra que exista un óptimo único.
+
+La validación posterior se calcula **solo para la combinación elegida** y no interviene en
+su elección. La forma, la coherencia mes/trimestre y los saltos temporales **no son términos
+directos del objetivo de selección**. Shape puede cambiar predicciones y afectar al error,
+pero reducir un residuo de coherencia no recibe un premio separado. Revisa validación,
+familias/horizontes y gráficos guardados antes de aceptar una propuesta. Son comprobaciones
+para valorar al ganador; no cambian la regla implementada.
+
 ## 5. Qué verás en MLflow y en el notebook
 
 El notebook arranca el servicio gestionado en **`127.0.0.1`** y muestra un enlace. Ejecuta la
@@ -226,8 +285,8 @@ ganadora y el padre. Los archivos incluyen informes CSV, snapshots del grid y co
 huellas de datos y procedencia del código/entorno. Los detalles opcionales de predicciones
 permiten auditar errores concretos. Las huellas identifican los datos suministrados; no son
 una copia del dataset ni sustituyen conservar los datos para reproducir una ejecución real.
-`LOG_PREDICTIONS=False` omite los archivos individuales de precios/predicciones emparejados;
-se siguen guardando informes agregados y metadatos de configuración/procedencia.
+`LOG_PREDICTIONS=False` omite los precios/predicciones individuales emparejados **y las curvas
+completas guardadas**; permanecen informes agregados y metadatos de configuración/procedencia.
 
 Se usa un servicio local con archivos locales; no hace falta una cuenta de MLflow en la nube.
 Con datos reales, los archivos pueden contener precios propios e identificadores. Permanecen
@@ -257,8 +316,9 @@ y [MLflow Tracking](https://mlflow.org/docs/latest/ml/tracking/).
    `reports/calibration_report.csv` del padre contiene todo el grid. **`audit/`** guarda JSON
    de configuración, grid, fechas, parámetros elegidos, huellas y procedencia, según abras
    el padre o una hija. **`predictions/`** en las hijas guarda observaciones/predicciones
-   individuales emparejadas cuando se habilitan. Con `LOG_PREDICTIONS=False` no se generan
-   esos archivos; permanecen informes y metadatos. La etiqueta `vwaps.predictions` de cada
+   individuales emparejadas cuando se habilitan. **`curves/`** guarda curvas completas para
+   inspección visual. Con `LOG_PREDICTIONS=False` no se generan predicciones individuales
+   ni snapshots de curvas; permanecen informes y metadatos. La etiqueta `vwaps.predictions` de cada
    hija registra `enabled` o `disabled`.
 5. Revisa cobertura y score de validación de la ganadora y después los errores por unidad.
    Los nombres de métricas por unidad usan una etiqueta normalizada y un hash;
@@ -268,6 +328,57 @@ y [MLflow Tracking](https://mlflow.org/docs/latest/ml/tracking/).
 
 La tabla ordenada del notebook muestra directamente la política de selección. MLflow ayuda
 a inspeccionar y comparar ejecuciones; ordenar la interfaz no elige parámetros por sí mismo.
+
+<a id="saved-curves"></a>
+
+### Explorar las curvas guardadas de un candidato
+
+El notebook de experimentos incluye las mismas vistas que [el visor CSV](NOTEBOOK.es.md),
+con selectores de experimento guardado, ejecución padre, candidato y etapa:
+
+**Para abrir runs anteriores sin ejecutar otro backtest:** ejecuta solo la celda editable
+de ajustes de la **sección 1** y después la celda del visor de la **sección 8**. Esa celda
+resuelve raíz/almacenamiento, arranca o reutiliza MLflow local e importa sus dependencias.
+Omite la preparación del dataset y el tuning: no necesita input VWAP/EEX, un objeto dataset
+ni una variable `result` anterior. Ajusta `PROJECT_ROOT`, `MLFLOW_STORAGE`, `MLFLOW_PORT`
+y `EXPERIMENT_NAME` para localizar los experimentos guardados. La parada opcional de la
+**sección 9** también funciona después de este flujo independiente.
+
+1. En **Experiment:** escribe el nombre del experimento y pulsa **Refresh runs**.
+2. Elige **Run:** y **Trial:**. Selecciona **Calibration (all trials)** o,
+   para el candidato ganador, **Validation (selected trial only)**.
+3. Pulsa **Load saved curves**. Usa **Curve:**, **View:** y las pestañas **Single date**,
+   **Range means**, **Fixed delivery evolution**. La curva completa incluye todos los tipos
+   y tenors guardados para esa curva/fecha; no inventa filas ausentes del CSV.
+
+El visor lee los archivos persistidos del run mediante descargas temporales bajo
+`<MLFLOW_STORAGE>/viewer_cache` (por defecto `output/mlflow/viewer_cache`). Los ficheros
+descargados se eliminan después de cargarlos; no es una caché persistente que sustituya
+a los archivos guardados. No recalcula resultados antiguos con el config o los ficheros actuales.
+Los archivos pertenecen a la ejecución hija de cada candidato:
+
+| Archivo de MLflow | Disponibilidad | Significado |
+|---|---|---|
+| `curves/calibration_filled.csv` | Cada candidato cuya etapa de motor de calibración terminó, con registro activo | Curvas completas generadas en el intervalo de calibración. |
+| `curves/validation_filled.csv` | Solo el ganador, si terminó su etapa de validación y el registro está activo | Curvas completas generadas en el intervalo reservado. |
+| `predictions/calibration_paired_predictions.csv` | Si está activo el registro individual | Casos ocultados para auditar errores y cobertura. |
+| `predictions/validation_paired_predictions.csv` | Solo el ganador, si está activo | Casos ocultados de validación de la combinación elegida. |
+
+**Las curvas completas conservan los propios visibles. No son las curvas con cada observación
+LOO ocultada.** Muestran cómo rellena ese candidato una curva normal con los originales
+disponibles. Usa las métricas y predicciones ocultadas para evaluar precisión; las curvas
+completas sirven para revisar forma, diferencias entre agregados y cambios entre fechas.
+Coincidir con un original visible en el gráfico no demuestra que se haya acertado un precio oculto.
+
+Los snapshots proceden de las ejecuciones existentes del motor, excluyen el output de
+calentamiento y cubren desde la primera hasta la última fecha de la etapa. Pueden incluir
+fechas/targets generados que no estén en los casos individuales de LOO. Si una fase posterior
+falla, pueden quedar archivos de una etapa ya terminada: revisa estado e informes del run.
+
+No hay curvas completas en runs antiguos que no las guardaron, con `LOG_PREDICTIONS=False`,
+ni en validación para candidatos perdedores. El visor explica qué falta. Para obtenerlas,
+ejecuta un experimento **nuevo** con registro activo; no reconstruye en silencio el pasado
+usando datos actuales. También puedes descargar esos CSV directamente desde MLflow.
 
 ## 6. Usarlo en el ordenador con datos reales
 
@@ -315,8 +426,8 @@ histórico previo para las técnicas que quieras comparar.
 
 ## 8. Ejecución comprobada
 
-En Windows con Python **3.14.2** y MLflow **3.17.0**, la suite completa pasó **715 tests** en
-44,70 segundos, con un aviso de deprecación de MLflow/SQLAlchemy. Se ejecutó el notebook en
+En Windows con Python **3.14.2** y MLflow **3.17.0**, la suite completa pasó **751 tests** en
+51,34 segundos, con un aviso de deprecación de MLflow/SQLAlchemy. Se ejecutó el notebook en
 el kernel Jupyter real de `.venv` tanto con el offset predeterminado **0** como con **-1**
 explícito. La ejecución -1 completó las seis hijas candidatas bajo un padre, con **25 fechas
 de calibración / 290 casos emparejados** y **5 fechas de validación / 58 casos** solo para
@@ -326,6 +437,18 @@ cada publicación admitida cumple **`eex_asof <= eex_cutoff_date = T - 1 día na
 La ejecución -1 comprobó también respuesta HTTP 200 de la interfaz local y parada limpia
 del servicio. Las pruebas anteriores con offset predeterminado verificaron subida/descarga
 de informes y conservación de registros al detener y volver a arrancar el servicio.
+
+Después se comprobó el visor de curvas guardadas en el notebook/kernel real y el servicio
+local con offset -1. Los seis candidatos guardaron **300 filas completas de calibración**
+cada uno y solo el ganador guardó **60 filas completas de validación**. Son curvas distintas
+de los casos ocultados contados arriba. Se alternaron calibración de un no ganador y
+validación del ganador, vistas de curva completa/Month/Quarter y las tres pestañas gráficas.
+
+Se volvió a ejecutar el visor independiente tras eliminar `dataset` y `result` y apuntar
+las rutas de input/config a archivos inexistentes. Se hizo que `run` del motor fallase si
+alguien lo llamaba: las curvas guardadas cargaron con **cero nuevas ejecuciones del motor**.
+La interfaz respondió HTTP 200 y el servicio se detuvo limpiamente. Se comprueba así la
+consulta de archivos persistidos sin cargar los originales ni recrear el experimento en silencio.
 
 Estas comprobaciones validan el flujo local probado, no la precisión con propios reales que
 no tenemos, la optimalidad de los parámetros ganadores sintéticos ni la ejecución en todas

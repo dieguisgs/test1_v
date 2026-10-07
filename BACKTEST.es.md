@@ -89,6 +89,56 @@ La validación es cronológica con aprendizaje diario: originales de una fecha d
 ya pasada pueden alimentar fechas posteriores. No simula un bloque que permanece sin propios.
 Tampoco repite actualmente varios cortes temporales ni da incertidumbre sobre el ganador.
 
+### Leer la elección como una decisión, no como un certificado
+
+La verdad de cada observación ocultada es **su VWAP propio**. Modelo y EEX se comparan con
+ese mismo precio. Una curva es la identidad `(product, region, unit)`, no la familia de tenor.
+En los casos predichos por **todos** los candidatos de calibración, se calcula primero el MAE
+de modelo y EEX para cada curva, se dividen y se promedian los cocientes dando igual peso a
+cada identidad.
+
+Si el propio es 100, EEX 110 y la predicción 106, los errores son 10 y 6: en este ejemplo de
+un caso/curva el score es **0.6**, una reducción del error del 40% frente a EEX. La respuesta
+buscada es 100: parecerse a EEX no es el objetivo. Entre varias curvas, **0.8** no equivale
+necesariamente a un 20% menos de MAE absoluto conjunto. Dos curvas EUR/MWh con igual número
+de casos y `(MAE EEX, MAE modelo)` de `(10, 6)` y `(1, 1)` dan score 0.8, pero su MAE conjunto
+baja de 5.5 a 3.5: un 36.4%. No se pueden mezclar errores absolutos de distintas unidades.
+Si EEX tiene MAE cero, un modelo exacto recibe cociente 1; cualquier error recibe infinito.
+
+Antes del score se prioriza cobertura máxima: A con 100/100 predicciones gana a B con 99/100
+aunque B tenga menor error en los casos comunes. Evita ganar por abstenerse ante casos
+difíciles, pero un punto adicional rellenado puede imponerse a una mejora grande de precisión.
+Los casos fuera de la intersección afectan a cobertura, no al score común. Su denominador
+son **propios ocultados elegibles con referencia EEX**, no todos los huecos reales de producción.
+
+El peso igual por curva evita que domine una por tener muchas observaciones y permite
+comparar sin mezclar monedas. A cambio, una curva con pocos datos vota igual que otra con
+muchos y un error EEX diminuto puede dominar los cocientes. Mira errores absolutos por unidad
+y tamaños de muestra. Un empate exacto elige el primer candidato del grid. Solo el ganador
+pasa a las fechas posteriores de validación; sus errores no lo eligen ni cambian sus parámetros.
+
+**Suavidad, coherencia mes/trimestre y saltos entre fechas no son términos directos del
+ranking actual.** Shape puede afectar predicciones y error, pero una curva más bonita o un
+residuo menor no reciben un premio independiente. Revisa validación, familias/horizontes,
+cobertura, errores grandes y forma antes de aceptar la propuesta. Se evalúan este grid y
+este enmascarado de conocidos; no se demuestra qué es mejor para precios reales que no
+tenemos. Esta explicación no modifica el algoritmo de selección.
+
+### Curvas completas y predicciones ocultadas responden preguntas distintas
+
+El [notebook MLflow](MLFLOW.es.md) permite ver curvas completas guardadas para cada candidato
+en calibración y para el ganador en validación. Conservan los propios disponibles del día:
+**no son curvas LOO con el precio evaluado retirado**. Revisa en esos gráficos forma,
+diferencias mes/trimestre, cambio de mes y evolución temporal; mide precisión con métricas
+y predicciones ocultadas. Reproducir un original visible en el gráfico no es acertar un backtest.
+
+Con `LOG_PREDICTIONS=True`, las hijas guardan `curves/calibration_filled.csv` y, en la ganadora,
+`curves/validation_filled.csv`, además de las predicciones emparejadas. `False` omite tanto
+predicciones individuales como curvas completas. El visor lee archivos persistidos, incluidos
+experimentos anteriores, sin recalcular con datos actuales. Si un run antiguo no guardó
+curvas, genera otro experimento para obtenerlas; no se reconstruye el archivo ausente como
+si fuera la salida original de aquella ejecución.
+
 ### Disponibilidad EEX: escenario fijo de evaluación
 
 `eex.offset_days=0` permite publicaciones hasta la referencia T; `-1` solo hasta T-1 día
