@@ -73,6 +73,43 @@ class CsvBatch:
         """Include an accompanying audit JSON or text file in the same batch."""
         self._stage_path(destination).write_text(text, encoding="utf-8")
 
+    def stage_excel(self, destination: Path, frame: pd.DataFrame) -> None:
+        """Stage a mapping worksheet while retaining other workbook sheets.
+
+        Only the first worksheet is the editable mapping table. Existing cell
+        styles are retained where possible; columns are written as literal
+        values, including strings starting with an equals sign.
+        """
+        from openpyxl import Workbook, load_workbook
+
+        if destination.suffix.lower() != ".xlsx":
+            raise ValueError("Excel mapping destinations must use the .xlsx extension")
+        workbook = load_workbook(destination) if destination.exists() else Workbook()
+        try:
+            sheet = workbook.worksheets[0]
+            previous_rows, previous_columns = sheet.max_row, sheet.max_column
+            values = [list(frame.columns), *frame.where(pd.notna(frame), None).values.tolist()]
+            for row_index, row in enumerate(values, 1):
+                for column_index, value in enumerate(row, 1):
+                    if hasattr(value, "item"):
+                        value = value.item()
+                    if value is not None and pd.isna(value):
+                        value = None
+                    cell = sheet.cell(row_index, column_index, value)
+                    if value is None:
+                        cell.value = None
+                    elif isinstance(value, str):
+                        cell.data_type = "s"
+            for row_index in range(1, max(previous_rows, len(values)) + 1):
+                for column_index in range(1, max(previous_columns, len(frame.columns)) + 1):
+                    if row_index > len(values) or column_index > len(frame.columns):
+                        sheet.cell(row_index, column_index).value = None
+            sheet.freeze_panes = "D2"
+            sheet.auto_filter.ref = sheet.dimensions
+            workbook.save(self._stage_path(destination))
+        finally:
+            workbook.close()
+
     def _stage_path(self, destination: Path) -> Path:
         destination = destination.resolve()
         if destination in self.staged:

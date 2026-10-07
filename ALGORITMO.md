@@ -18,7 +18,7 @@ Cómo se genera, cada día, la curva completa de un producto (por ejemplo DE Bas
 
 ## Qué necesitas configurar y qué puedes dejar con los valores iniciales
 
-Las 59 entradas de `config.toml` no son 59 parámetros que debas optimizar: 19 son rutas,
+Las 60 entradas de `config.toml` no son 60 parámetros que debas optimizar: 19 son rutas,
 nombres de columnas y zonas horarias. Para un primer uso, basta con revisar las rutas,
 el mapping de identidades, los tenors objetivo y mantener el modo `auto`. Las capas
 `correlation`, `cross` y `arbitrage` permanecen desactivadas. Los controles avanzados se documentan
@@ -29,6 +29,9 @@ otros cinco controles requiere indicarlo expresamente. El resto del TOML permane
 **Cambio de respaldo:** sin ajuste propio utilizable, EEX se suaviza con ventanas completas de publicaciones; nunca se copia directamente como respaldo. La sección 16 explica medias, cascada mensual, controles y auditoría.
 
 **Capa shape:** la sección 17 y [SHAPE.es.md](SHAPE.es.md) explican la etapa opcional implementada después del relleno. Los casos y fórmulas siguientes describen el precio previo a shape, que también es el final con `shape.mode="off"` por defecto. El input bruto siempre se conserva; solo se pueden mover precios propios finales con `shape.adjust_originals=true`. La capa activa añade valores previos y trazas específicas.
+
+
+**Configuración global o individual implementada:** `[run].configuration_mode` elige `global` (predeterminado, ignora celdas individuales) o `individual` (aplica por curva las celdas no vacías del mapping CSV/Excel). Se pueden sustituir los 33 controles escalares y la lista `tenors`; no son perfiles cerrados. [CONFIGURATION.es.md](CONFIGURATION.es.md) explica las 34 columnas, herencia, prioridad del CLI, diario/refill/catchup y trazabilidad. La búsqueda global o por producto de MLflow es una elección independiente: el Excel guarda una configuración fija, y el notebook/JSON guarda las mallas.
 
 ## 0. Entender el producto antes de leer las fórmulas
 
@@ -1330,7 +1333,7 @@ resumen o `status`.
 
 ## 6. Parámetros (`config.toml`)
 
-Resumen de controles principales. La **sección 14 detalla las 59 claves de config.toml**,
+Resumen de controles principales. La **sección 14 detalla las 60 claves de config.toml**,
 incluidos aliases, zonas horarias, sensibilidad, condiciones de uso y restricciones.
 
 **Qué capas se usan** (`[layers]`). Así se configura la ejecución sin tocar código:
@@ -1652,7 +1655,7 @@ co-movimientos a propósito: **decide con el backtest de tus datos reales**.
 
 Los tres usos comparten el mismo config, cuyo input por defecto es `data/vwaps.xlsx`. Para
 probar por separado un histórico sintético que hayas generado, selecciona ese fichero
-explícitamente; no se incluye en el paquete portable:
+explícitamente; los ficheros sintéticos generados no se publican con el repositorio de código:
 
 ```powershell
 .\.venv\Scripts\python.exe run.py refill --from 2026-08-10 --to 2026-09-30 --vwap data/synthetic_vwaps.csv
@@ -1836,9 +1839,11 @@ mediante el punto medio, aunque los tres EEX mensuales sean iguales.
 El input real vive en otra máquina. No hace falta copiarlo a la máquina de desarrollo:
 el programa y esta documentación se trasladan a donde ya están los datos.
 
-El paquete `dist/vwaps-portable.zip` contiene el código, dependencias declaradas, configuración
-y documentación. No incluye `.venv`, los datos sintéticos, las salidas generadas ni el mapeo
-de demostración. El `config.toml` del paquete tiene rutas iniciales relativas:
+Clona [el repositorio de código](https://github.com/dieguisgs/test1_v) en esa máquina o copia
+sus archivos de código y documentación a una carpeta de trabajo. Incluye código, dependencias
+declaradas, configuración, notebooks y guías bilingües. No se publican inputs reales, archivos
+EEX locales, mapping local, `.venv` ni salidas generadas; el mapping ficticio de ejemplo está
+desactivado. El `config.toml` incluido tiene rutas iniciales relativas:
 
 ```toml
 [paths]
@@ -1854,7 +1859,7 @@ absolutas; en TOML para Windows es práctico escribir `C:/datos/vwaps.xlsx`.
 
 ### 13.1. Instalación
 
-1. Descomprime el paquete en una carpeta de trabajo de la máquina de destino.
+1. Clona el repositorio o copia el código a una carpeta de trabajo de la máquina de destino.
 2. Comprueba que dispone de **Python 3.11 o posterior**.
 3. Instala las dependencias desde esa carpeta con una de estas opciones:
 
@@ -1870,6 +1875,10 @@ python -m venv .venv
 `uv sync` utiliza la declaración de dependencias y el bloqueo del proyecto. La alternativa
 con pip instala las dependencias necesarias para CSV y XLSX, pero no fija las mismas versiones.
 No se debe copiar el entorno `.venv` de la máquina de desarrollo.
+
+Para los dos notebooks y el servicio MLflow local, usa `uv sync --group notebook --group experiment`
+y selecciona el entorno resultante como kernel. Texto, código e interfaz de los notebooks
+están en inglés; las guías Markdown independientes están en inglés y español.
 
 ### 13.2. Configuración y primera ejecución
 
@@ -1914,7 +1923,7 @@ Revisa `output/enriched/<fecha>.csv`, `output/enriched_history.csv` y el log. `d
 y `estimation_method` permiten distinguir observaciones y estimaciones. Un código de salida 1
 requiere consultar el log; si el motor registró errores, no habrá reemplazado los resultados
 existentes con una ejecución parcial. Para reproducir una revisión conserva también la versión
-del paquete, el config, el mapeo y los ficheros de entrada utilizados.
+del código o su commit, el config, el mapeo y los ficheros de entrada utilizados.
 
 
 Para recuperar pendientes hasta hoy, utiliza `python run.py catchup`, opcionalmente con
@@ -1926,7 +1935,7 @@ ya procesados o enriquecer todo el input. Consulta la sección 5.
 
 ## 14. Referencia completa de configuración: qué controla cada decisión
 
-Este capítulo documenta las **59 claves del `config.toml` entregado**. Los valores por defecto se refieren a ese archivo, no a una configuración parcialmente omitida. Edita las secciones TOML existentes sin duplicarlas. Cambiar un parámetro modifica el modelo o la selección de datos; aumentarlo no implica que el precio suba ni que la estimación mejore.
+Este capítulo documenta las **60 claves del `config.toml` entregado**. Los valores por defecto se refieren a ese archivo, no a una configuración parcialmente omitida. Edita las secciones TOML existentes sin duplicarlas. Cambiar un parámetro modifica el modelo o la selección de datos; aumentarlo no implica que el precio suba ni que la estimación mejore.
 
 Las tablas separan el efecto del parámetro de las condiciones en las que interviene. El cargador y el motor validan tipos, números finitos y límites obligatorios. Se rechazan booleanos entre comillas y una cadena única en lugar de la lista de tenors. Los rangos de calibración recomendados siguen siendo orientativos: una configuración válida no implica precisión predictiva.
 
@@ -2032,6 +2041,7 @@ Los coeficientes cross llevan la sorpresa del ayudante a la escala de la base de
 
 | Clave | Defecto | Qué ocurre al aumentar / disminuir | Cuándo interviene / restricciones |
 |---|---|---|---|
+| `run.configuration_mode` | `"global"` | `global` ignora celdas individuales; `individual` aplica las no vacías sobre los valores TOML. | Mismo resolutor para diario, refill, catchup y backtest; se registran todos los valores efectivos. Véase [CONFIGURATION.es.md](CONFIGURATION.es.md). |
 | `run.warmup_days` | `0` | Cero reproduce toda la historia anterior suministrada. Entre positivos, mayor conserva contexto y requiere más trabajo; menor acorta el calentamiento a costa de memoria previa. | El cargador exige entero no negativo. Un límite positivo puede hacer que daily difiera de un refill largo. No busca archivos ausentes: proporciona originales acumulados e historia EEX. |
 
 ### Asignación del esquema de entrada
@@ -2060,7 +2070,7 @@ detalla la gestión de fallos.
 
 ### Controles opcionales de forma posteriores al relleno
 
-Estas siete claves implementadas completan el inventario de 59. La sección 17 desarrolla objetivo, ejemplos y procedencia. Sus valores numéricos iniciales no están calibrados.
+Estas siete claves implementadas completan el inventario de 60. La sección 17 desarrolla objetivo, ejemplos y procedencia. Sus valores numéricos iniciales no están calibrados.
 
 | Clave | Inicial | Significado y efecto |
 |---|---|---|
@@ -2291,7 +2301,7 @@ anchor_months = 2
 Estos controles no afectan a originales ni a precios con ajuste local/histórico/cross.
 Las ventanas de precio y spread son independientes: no se exige que una sea mayor que la otra.
 La antigüedad máxima controla el último snapshot permitido, no convierte las ventanas en
-ventanas de días naturales. Las 59 claves del config incluyen estos cinco controles.
+ventanas de días naturales. Las 60 claves del config incluyen estos cinco controles.
 
 En `daily`, `refill`, `catchup`, `backtest` y `tune` se pueden sustituir para una ejecución:
 
@@ -2579,9 +2589,10 @@ relleno con otra configuración permitida. Las actualizaciones del basis histór
 correlaciones siguen siendo las del algoritmo cronológico existente, no una etapa nueva de MLflow.
 
 El comando CLI `tune` de la sección 15 conserva sus **seis** controles del grid. El notebook/API
-de experimentos admite **29** controles del modelo: esos seis, activación local/arbitrage,
-peso de otra familia, memoria y umbral histórico, memoria/evidencia de correlación y cross,
-los cinco controles del fallback EEX y los siete de shape. La guía enumera sus nombres planos
+de experimentos admite los **33 controles escalares del modelo**: esos seis, activación
+local/arbitrage, peso de otra familia, memoria y umbral histórico, memoria/evidencia de
+correlación y cross, cinco controles del fallback EEX, siete de shape y `min_volume`,
+`max_anchor_dev`, `ratio_eex_floor`, `max_ratio_deviation`. La guía enumera sus nombres planos
 Python, tipos y límites exactos. Por ejemplo:
 
 ```python
@@ -2592,12 +2603,22 @@ PARAMETER_GRID = {
 ```
 
 Esto crea **3 × 2 = 6** candidatos. Las listas forman un producto cartesiano limitado por
-`MAX_TRIALS` (24 en el notebook). Lo omitido queda fijo. Se excluyen del grid rutas,
-mapping/identidad, targets, convenciones, filtros de volumen/extremos, protecciones del ratio,
-offset de disponibilidad/antigüedad EEX y fechas de evaluación para conservar un universo común de observaciones.
+`MAX_TRIALS` (24 por búsqueda en el notebook). Lo omitido queda fijo. Se excluyen del grid
+rutas, mapping/identidad, targets, convenciones, offset de disponibilidad/antigüedad EEX,
+calentamiento y fechas de evaluación.
 Admitir un parámetro no significa que convenga optimizarlo ni que tenga efecto en todos los casos.
 
-La evaluación conserva sus reglas: ocultar un periodo físico propio y todos sus alias;
+La campaña MLflow fija los propios evaluables con EEX independientemente de los filtros
+de cada candidato: al elegir las verdades del examen se desactivan `min_volume` y
+`max_anchor_dev`. Sus valores candidatos siguen filtrando anclas visibles y aprendizaje
+histórico. Las guardas ratio también actúan en cada estimador sin borrar verdades difíciles
+del examen. Subir el volumen mínimo no permite mejorar simplemente quitando respuestas
+de bajo volumen. Las abstenciones siguen afectando a cobertura e intersección común de
+predicciones. Un `backtest` configurado y el CLI `tune` de seis controles conservan sus
+filtros de elegibilidad fijos; una malla API ampliada fija la población si varía esos
+filtros o el umbral ratio. Véase [BACKTEST.es.md](BACKTEST.es.md).
+
+El enmascarado y el ranking conservan sus reglas: ocultar un periodo físico propio y todos sus alias;
 priorizar cobertura máxima en calibración y después minimizar el promedio por curva de
 `MAE_model / MAE_EEX` sobre casos predichos por **todos** los candidatos. La verdad es el VWAP
 propio ocultado, no EEX. Los errores absolutos se separan por unidad. Se reservan las fechas
@@ -2605,8 +2626,16 @@ elegibles recientes y se evalúa **solo al ganador de calibración**, manteniend
 Los originales de fechas anteriores pueden seguir actualizando el histórico para las fechas
 posteriores. El ejemplo del notebook reserva cinco fechas; el CLI mantiene veinte por defecto.
 
-El registro crea una ejecución padre y sus hijas candidatas, guardando configuración, grid,
-fechas, huellas de datos, procedencia del código e informes. `LOG_PREDICTIONS=False` omite tanto
+`SEARCH_SCOPE="global"` busca una configuración común e ignora excepciones de modelo del
+Excel. `SEARCH_SCOPE="individual"` busca por identidad seleccionada desde su base efectiva
+de producción, con malla común o una malla de sustitución por producto. Los ganadores
+individuales se comprueban después juntos, con valores fijos y las mismas fechas reservadas:
+se verifica su comportamiento combinado; no es un segundo examen independiente. Véase
+[CONFIGURATION.es.md](CONFIGURATION.es.md).
+
+El registro crea una ejecución padre por búsqueda y sus hijas candidatas, enlazadas por
+un ID de campaña, guardando configuración, grid, fechas, huellas de datos, procedencia del
+código e informes. `LOG_PREDICTIONS=False` omite tanto
 predicciones individuales **como curvas completas**, pero conserva agregados y metadatos. El servicio local
 escucha en `127.0.0.1`. La configuración elegida es una propuesta: no cambia automáticamente
 el config ni publica curvas de producción. MLflow es opcional: el relleno habitual y el
@@ -2699,7 +2728,7 @@ de que deje de existir información entre mercados.
 `daily`, `refill`, `catchup`, `backtest` y `tune` admiten `--eex-offset-days 0` o `-1`, y otros
 enteros no positivos. En el notebook `EEX_OFFSET_DAYS=None` respeta el config seleccionado;
 un entero sustituye el valor de la copia del dataset sin reescribir el TOML. La disponibilidad
-queda fija dentro de un grid: se excluye tanto de los seis campos del CLI como de los 29 de
+queda fija dentro de un grid: se excluye tanto de los seis campos del CLI como de los 33 de
 experimentos. Compara offsets en ejecuciones separadas y claramente identificadas. Usa las
 mismas fechas de evaluación previstas y revisa muestra emparejada y cobertura reales: una
 política más estricta puede eliminar observaciones evaluables y hacer los scores no comparables.

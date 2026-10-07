@@ -20,6 +20,7 @@ output/
   tuning_calibration.csv         Puntuaciones de calibración de cada candidato
   tuning_validation.csv          Puntuaciones posteriores del candidato seleccionado
   tuning_selected.json           Propuesta de parámetros y metadatos de evaluación
+  configurations/<id>.json       Documentos de contexto referenciados por las filas de curva
   _logs/vwaps_YYYY-MM-DD.log      Registro de ejecución de comandos
 ```
 
@@ -63,7 +64,7 @@ Los nombres de entrada `data_origin`, `estimation_method` y los que empiezan por
 | `curve_row_type` | Texto: `original`, `original_invalid`, `added` | Indica si la fila física existía, tenía VWAP inutilizable o se añadió. Independiente de la procedencia del precio. |
 | `curve_flags` | Texto separado por `;` o vacío | Flags del motor más flags del enriquecido, descritos abajo. |
 
-**Las demás columnas del motor de la sección siguiente se copian con el prefijo `curve_`**, salvo `data_origin` y `estimation_method`, que siguen las reglas del enriquecido. La traza normal completa incluye además `curve_area`, `curve_profile`, `curve_kind`, `curve_period`, `curve_delivery_start`, `curve_delivery_end`, `curve_hours`, `curve_confidence`, `curve_basis_mode`, `curve_configured_basis_mode`, `curve_own_vwap`, `curve_own_volume`, `curve_eex_settle`, `curve_eex_method`, `curve_eex_asof`, `curve_eex_offset_days`, `curve_eex_cutoff_date`, `curve_eex_fallback_trace`, `curve_basis`, `curve_basis_local`, `curve_basis_hist`, `curve_cross_adj`, `curve_local_weight`, `curve_anchors`, `curve_cross_from` y **`curve_flag`**. Si el motor no produjo filas, solo están garantizadas las columnas fijas del enriquecido; las trazas opcionales dependen de la tabla del motor recibida.
+**Las demás columnas del motor de la sección siguiente se copian con el prefijo `curve_`**, salvo `data_origin` y `estimation_method`, que siguen las reglas del enriquecido. La traza normal completa incluye además `curve_area`, `curve_profile`, `curve_kind`, `curve_period`, `curve_delivery_start`, `curve_delivery_end`, `curve_hours`, `curve_confidence`, `curve_basis_mode`, `curve_configured_basis_mode`, `curve_configuration_mode`, `curve_configuration_id`, `curve_configuration_parameters`, `curve_own_vwap`, `curve_own_volume`, `curve_eex_settle`, `curve_eex_method`, `curve_eex_asof`, `curve_eex_offset_days`, `curve_eex_cutoff_date`, `curve_eex_fallback_trace`, `curve_basis`, `curve_basis_local`, `curve_basis_hist`, `curve_cross_adj`, `curve_local_weight`, `curve_anchors`, `curve_cross_from` y **`curve_flag`**. Si el motor no produjo filas, solo están garantizadas las columnas fijas del enriquecido; las trazas opcionales dependen de la tabla del motor recibida.
 
 `curve_flag` copia sin cambios el `flag` singular del motor. `curve_flags` es el campo combinado del enriquecido. Son distintos. En originales válidos, `curve_price`, `curve_source` y, si existen, `curve_own_vwap`/`curve_own_volume` describen esa fila original concreta. Un ajuste original permitido de shape cambia solo el precio utilizable y su procedencia; quedan disponibles el dato bruto y sus diagnósticos propios. Las demás trazas describen el punto correspondiente del motor: pueden estar vacías o referirse a un agregado de originales con el mismo periodo de entrega. Que exista una fila original no significa que se hayan calculado todos sus diagnósticos.
 
@@ -77,7 +78,7 @@ Ejemplo ilustrativo, no observaciones reales de mercado; las tres filas pertenec
 
 La tercera fila recibe también `original_vwap_missing_or_invalid`. Si pudiera estimarse, su `vwap` original seguiría siendo `invalid`; `curve_price` contendría la estimación y `data_origin` pasaría a `estimated`.
 
-## Salida filled: las 35 columnas base del motor
+## Salida filled: las 39 columnas base del motor
 
 Estas columnas aparecen en `filled_history.csv` y los filled diarios. Hay una fila por etiqueta objetivo resoluble y curva/fecha `fill` activa; shape activa también incluye etiquetas propias Month/Quarter/Year para contexto. Un objetivo no resoluble no genera fila. Varias etiquetas pueden representar el mismo periodo de entrega.
 
@@ -102,6 +103,10 @@ Estas columnas aparecen en `filled_history.csv` y los filled diarios. Hay una fi
 | `estimation_method` | Texto | `none` para own, `unavailable` para missing o método de cálculo descrito abajo. |
 | `basis_mode` | Texto: `ratio`, `additive` | Modo efectivo seleccionado para este objetivo. En filas own/missing/eex+smooth no implica que se haya aplicado un ajuste. |
 | `configured_basis_mode` | Texto: `auto`, `ratio`, `additive` | Configuración solicitada antes de la selección por objetivo. |
+| `configuration_mode` | Texto: `global`, `individual` | Política usada para resolver parámetros; no es el modo ratio/aditivo. |
+| `configuration_id` | Texto: SHA-256, 64 caracteres hexadecimales | Huella de los 34 campos efectivos del modelo. Iguales valores producen igual ID; no incluye rutas, inputs, código ni disponibilidad EEX. |
+| `configuration_parameters` | JSON | Valores completos de los 33 controles escalares y `tenors`, incluidos los heredados. Permite auditar la configuración real de esa curva; no es una malla de candidatos. |
+| `configuration_context_id` | Texto: SHA-256 | Huella del mapping y contexto operativo del receptor y, con CROSS activo, de configuraciones de helpers activos. Documento completo: `configurations/<id>.json` dentro del directorio de salida configurado. |
 | `own_vwap` | Número o vacío | Precio propio del periodo, posiblemente agregado de duplicados/alias; vacío si no hay contrato propio utilizable con horas positivas. |
 | `own_volume` | Número o vacío | Volumen asociado al periodo propio; puede estar agregado o no disponible. |
 | `eex_settle` | Número o vacío | Precio EEX del periodo, exacto o reconstruido. No necesariamente un settlement cotizado directamente. |
@@ -235,6 +240,7 @@ Los flags de motivo auto se emiten al calcular una estimación basada en EEX, no
 | `volume` | Volumen propio asociado; puede estar vacío. |
 | `n_other_anchors` | Anclas restantes del conjunto resumen configurado; no cuenta todas las filas originales ni indica pesos por método. |
 | `configured_basis_mode` | Configuración `auto`, `ratio` o `additive`. |
+| `configuration_mode`, `configuration_id`, `configuration_parameters`, `configuration_context_id` | Configuración y contexto efectivos de la curva, con el mismo significado que en filled. Identifican el procedimiento configurado; algunos métodos diagnósticos pueden omitir deliberadamente sus interruptores. |
 | `method` | `eex`, `pipeline_configured` o `local_<mode>`, `hist_<mode>`, `blend_<mode>`, `local_corr_<mode>`, `blend_corr_<mode>`, `hist_cross_<mode>`, con `<mode>` ratio/additive. Aparecen cuando hay datos y se ejecuta su rama. |
 | `basis_mode` | Modo efectivo ratio/additive; vacío en la referencia `eex`. |
 | `pred` | Predicción en `unit`. |
@@ -317,7 +323,7 @@ Todas las claves de `metadata`:
 - `calibration_paired_days`, `validation_paired_days`, `calibration_paired_start`, `calibration_paired_end`, `validation_paired_start`, `validation_paired_end`: fechas que realmente aportan observaciones comunes.
 - `warmup_days` = 0; `validation_protocol` = `fixed_selected_parameters_with_chronological_original_history_updates`.
 
-Las claves de `base_configuration` son `base_dir`, `vwap_input`, `mapping_file`, `eex_curves_dir`, `output_dir`; `layer_local`, `layer_correlation`, `layer_cross`, `layer_hist`, `layer_arbitrage`; `max_stale_days`, `warn_stale_days`, `eex_offset_days`, `timezones`, `tenors`, `day_convention`, `weekend_offset`; `basis_mode`, `min_volume`, `tau_log`, `other_kind_weight`, `shrink_k`, `ewma_halflife_days`, `max_anchor_dev`, `hist_auto_min_obs`; `corr_halflife_days`, `corr_prior_obs`, `cross_min_corr`, `cross_min_obs`, `cross_halflife_days`; `warmup_days`, `vwap_columns`, `ratio_eex_floor`, `max_ratio_deviation`, `hist_max_age_days`; `fallback_price_method`, `fallback_price_window`, `fallback_ewma_halflife`, `fallback_spread_window`, `fallback_anchor_months`. Son configuración, no resultados medidos; véanse [ALGORITMO.md](ALGORITMO.md) y [config.toml](config.toml). Las rutas se convierten en texto. Los diagnósticos no finitos se guardan como JSON `null`; los score CSV pueden mostrar `inf`/`-inf` en el caso anterior de referencia con error cero. Esto no permite precios de producción no finitos.
+`base_configuration` contiene todos los campos de `Config`: los 34 del modelo listados en [CONFIGURATION.es.md](CONFIGURATION.es.md), más `base_dir`, `vwap_input`, `mapping_file`, `eex_curves_dir`, `output_dir`, `max_stale_days`, `warn_stale_days`, `eex_offset_days`, `timezones`, `day_convention`, `weekend_offset`, `warmup_days`, `vwap_columns`, `configuration_mode` y `command_overrides`. El último guarda la sustitución explícita de parámetros del modelo por CLI; no es otro Excel ni una malla. Son configuración, no resultados medidos; véanse [ALGORITMO.md](ALGORITMO.md) y [config.toml](config.toml). Las rutas se convierten en texto. Los diagnósticos no finitos se guardan como JSON `null`; los score CSV pueden mostrar `inf`/`-inf` en el caso anterior de referencia con error cero. Esto no permite precios de producción no finitos.
 
 ## Archivos sintéticos
 
@@ -329,8 +335,8 @@ Son datos explícitamente simulados, nunca operaciones reales. `synthetic_vwaps.
 
 ## Shape activa: 11 columnas adicionales del motor
 
-Con `shape.mode=off` se conserva el esquema anterior de 35 columnas. Audit/adjust añaden
-estas 11 (46 columnas del motor en total). En el enriquecido todas llevan prefijo `curve_`,
+Con `shape.mode=off` se conserva el esquema anterior de 39 columnas. Audit/adjust añaden
+estas 11 (50 columnas del motor en total). En el enriquecido todas llevan prefijo `curve_`,
 incluidas `curve_data_origin_before_shape` y `curve_estimation_method_before_shape`.
 Una fila sin punto correspondiente del motor puede tener trazas vacías. Shape activa puede
 incorporar etiquetas propias Month/Quarter/Year completas fuera de los objetivos para el
@@ -430,7 +436,7 @@ outputs de producción de `[paths].output_dir`. Cada candidato tiene una ejecuci
 
 | Archivo de la hija | Cuándo se guarda | Esquema y finalidad |
 |---|---|---|
-| `curves/calibration_filled.csv` | Cada etapa de motor de calibración completada, con registro activo | El mismo esquema filled: **35 columnas base** más **11 de shape** si está activa (46 total). Curvas completas con originales visibles para revisión gráfica. |
+| `curves/calibration_filled.csv` | Cada etapa de motor de calibración completada, con registro activo | El mismo esquema filled: **39 columnas base** más **11 de shape** si está activa (50 total). Curvas completas con originales visibles para revisión gráfica. |
 | `curves/validation_filled.csv` | Solo etapa de validación completada del ganador, con registro activo | El mismo esquema filled, para el intervalo reservado. Los candidatos perdedores no tienen curva de validación. |
 | `predictions/calibration_paired_predictions.csv` | Si se activa el registro individual | Verdad propia ocultada, predicciones modelo/EEX, errores, claves y metadatos de disponibilidad EEX; no es un CSV filled de curva completa. |
 | `predictions/validation_paired_predictions.csv` | Solo el ganador, si se activa | Casos de validación ocultados y emparejados, no la curva con sus propios visibles. |
@@ -445,3 +451,18 @@ Sí conserva informes CSV agregados y JSON de configuración/auditoría. Si un r
 tiene curvas, se informa de su ausencia; el visor no las reconstruye con datos actuales.
 La [guía de archivos y visor MLflow](MLFLOW.es.md#saved-curves) detalla navegación, descargas,
 selección de etapas y acceso independiente a experimentos guardados.
+
+### Procedencia de configuración global e individual
+
+Las cuatro columnas de configuración se generan en ambos modos, también para precios originales y ausentes calculados por el motor. El enriquecido las copia con prefijo `curve_`, incluido `curve_configuration_context_id`; pueden faltar diagnósticos en originales sin fila correspondiente del motor. Véase [CONFIGURATION.es.md](CONFIGURATION.es.md). Catchup comprueba IDs de modelo y contexto y rechaza configuraciones guardadas incompatibles. Ampliar solo objetivos está permitido y recalcula los grupos afectados con tenors pendientes. Las filas globales antiguas sin ID mantienen el comportamiento anterior; individual exige refill explícito porque no conoce sus parámetros originales.
+
+`configuration_id` identifica los 34 valores propios de esa curva. `configuration_context_id` permite detectar además cambios relevantes de helpers, calendario y disponibilidad. Por ejemplo, cambiar la memoria histórica de un helper puede cambiar un receptor CROSS aunque su ID de modelo propio no cambie. La publicación normal guarda el contexto completo en `configurations/<configuration_context_id>.json`; consérvalo con el CSV, inputs y versión de código. Estos IDs no calculan una huella del contenido de los archivos de entrada.
+
+| Clave del JSON de contexto | Contenido |
+|---|---|
+| `schema_version` | Entero `1`, versión del formato del documento. |
+| `receiver` | `product`, `region`, `unit`, `use`, `area`, `profile`, `eex_file`, `hours` y `timezone` de la curva receptora. |
+| `operations` | Valores fijos `eex_offset_days`, `max_stale_days`, `day_convention`, `weekend_offset` y `warmup_days`. |
+| `cross_helpers` | Lista vacía si CROSS está apagado en el receptor. En otro caso, las demás curvas activas con sus campos de mapping y todos sus `model_parameters`, ordenadas por identidad. Incluye helpers potenciales aunque no aporten señal en una fecha concreta. |
+
+Los 34 parámetros propios del receptor permanecen en `configuration_parameters`, sin duplicarse en el contexto. Así ampliar solamente objetivos conserva el ID de contexto. Hay que interpretar juntos el ID de modelo y el ID de contexto.

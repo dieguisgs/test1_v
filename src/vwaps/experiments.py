@@ -7,7 +7,7 @@ including their artifact proxy. Prediction artifacts can be disabled entirely.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from contextlib import contextmanager
 from datetime import date, datetime
 import hashlib
@@ -29,6 +29,8 @@ import pandas as pd
 from vwaps.config import Config, validate_config
 from vwaps.io_eex import EexBook
 from vwaps.mapping import ProductMap
+from vwaps.identity import CurveKey
+from vwaps.product_config import effective_config, model_parameter_payload
 from vwaps.tuning import EXPERIMENT_TUNABLE_FIELDS, TuneResult, _candidates, tune_parameters
 
 
@@ -223,10 +225,12 @@ def _report_metrics(report: pd.DataFrame, stage: str) -> tuple[dict, dict]:
 
 
 class _Tracker:
-    def __init__(self, client, entities, experiment_id, parent_id, folder, cfg, total, log_predictions):
+    def __init__(self, client, entities, experiment_id, parent_id, folder, cfg, total, log_predictions,
+                 *, maps=(), target_curve=None, curve_parameters=None):
         self.client, self.entities = client, entities
         self.experiment_id, self.parent_id, self.folder = experiment_id, parent_id, folder
         self.cfg, self.total, self.log_predictions = cfg, total, log_predictions
+        self.maps, self.target_curve, self.curve_parameters = maps, target_curve, curve_parameters
         self.children = {}
         self.open_runs = {parent_id}
         self.started = time.monotonic()
@@ -301,13 +305,36 @@ class _Tracker:
             parameters = {"eex_offset_days": self.cfg.eex_offset_days, **payload["parameters"]}
             self.client.log_batch(run_id, params=[self.entities.Param(key, str(value))
                                                  for key, value in parameters.items()], synchronous=True)
-            self.json(run_id, folder, "configuration.json", asdict(self.cfg) | payload["parameters"])
+            trial_config = (effective_config(self.cfg,
+                            next(mapping for mapping in self.maps if mapping.key == self.target_curve),
+                            payload["parameters"]) if self.target_curve is not None else
+                            replace(self.cfg, **payload["parameters"]))
+            self.json(run_id, folder, "configuration.json", asdict(trial_config))
+            contexts = []
+            for mapping in self.maps:
+                if not mapping.active:
+                    continue
+                if self.curve_parameters is not None:
+                    base, overlay = self.cfg, self.curve_parameters.get(mapping.key)
+                elif self.target_curve is not None:
+                    base = self.cfg
+                    overlay = payload["parameters"] if mapping.key == self.target_curve else None
+                else:
+                    base, overlay = replace(self.cfg, **payload["parameters"]), None
+                contexts.append({"product": mapping.product, "region": mapping.region,
+                                 "unit": mapping.unit,
+                                 "use": "helper" if self.target_curve is not None and mapping.key != self.target_curve
+                                 else mapping.use,
+                                 "parameters": model_parameter_payload(effective_config(base, mapping, overlay))})
+            self.json(run_id, folder, "effective_curve_configurations.json", {"curves": contexts})
             self.json(run_id, folder, "trial.json", {"trial_id": trial_id, "run_id": run_id,
                                                      "parameters": payload["parameters"]})
             return
         child = self.children[trial_id]
         run_id, folder = child["id"], child["folder"]
-        if event == "curves_evaluated":
+        if event == "configuration_evaluated":
+            self.json(run_id, folder, "configuration_contexts.json", payload["configuration_contexts"])
+        elif event == "curves_evaluated":
             self.curves(child, payload["stage"], payload["filled"])
         elif event == "calibration_evaluated":
             self.predictions(child, "calibration", payload["available"])
@@ -333,6 +360,11 @@ def run_tracked_tuning(
     start: date, end: date, parameter_grid: dict[str, list], validation_days: int, max_trials: int,
     *, tracking_uri: str, experiment_name: str, output_dir: str | Path,
     data_label: str = "real", log_predictions: bool = True,
+    target_curve: CurveKey | None = None,
+    curve_parameters: dict[CurveKey, dict] | None = None,
+    date_split: tuple[list[date], list[date]] | None = None,
+    run_tags: dict[str, str] | None = None,
+    fixed_evaluation: bool = False,
 ) -> TrackedTuneResult:
     """Track the existing tuner without changing its calculations or selection.
 
@@ -349,9 +381,33 @@ def run_tracked_tuning(
     Each call creates a unique parent-run output folder. No production config
     is overwritten. A localhost run URL for direct database/file tracking is
     a suggested UI address; this function does not start a tracking server.
+
+    A normal call searches one shared global configuration, ignoring production
+    table overrides. ``target_curve`` instead changes only the exact selected
+    curve and preserves the effective helper settings. ``curve_parameters``
+    with an empty grid verifies one frozen collection of product settings; it
+    does not optimize a global winner. Campaigns supply a common ``date_split``
+    and ``fixed_evaluation=True`` to keep filter-independent truth cases. Full
+    effective configurations and immutable engine context documents are audit
+    artifacts even when price-level logging is disabled.
     """
+    cfg = (cfg if target_curve is not None or curve_parameters is not None else
+           replace(cfg, **cfg.command_overrides, command_overrides={}, configuration_mode="global"))
     validate_config(cfg)
-    candidates = _candidates(cfg, parameter_grid, max_trials, extended_grid=True)
+    if curve_parameters is not None and (target_curve is not None or parameter_grid):
+        raise ValueError("Fixed curve_parameters require an empty grid and no target_curve")
+    target_maps = [mapping for mapping in maps if mapping.active and mapping.use == "fill"
+                   and mapping.key == target_curve]
+    if target_curve is not None and len(target_maps) != 1:
+        raise ValueError("target_curve must identify exactly one active fill mapping")
+    candidate_base = effective_config(cfg, target_maps[0]) if target_curve is not None else cfg
+    candidates = ([{}] if curve_parameters is not None else
+                  _candidates(candidate_base, parameter_grid, max_trials, extended_grid=True))
+    if run_tags is not None and (not isinstance(run_tags, dict)
+            or any(not isinstance(k, str) or not isinstance(v, str) or not k.startswith("vwaps.")
+                   or k in {"vwaps.protocol", "vwaps.curve_outputs", "vwaps.curve_outputs_kind"}
+                   for k, v in run_tags.items())):
+        raise ValueError("run_tags must contain string vwaps.* metadata without reserved protocol tags")
     if start > end or cfg.warmup_days != 0:
         raise ValueError("Tracked tuning requires start <= end and run.warmup_days = 0")
     if isinstance(validation_days, bool) or not isinstance(validation_days, int) or validation_days < 1:
@@ -382,16 +438,23 @@ def run_tracked_tuning(
         experiment_id = experiment.experiment_id
     if experiment is not None and getattr(experiment, "lifecycle_stage", "active") != "active":
         raise ValueError(f"Experiment {experiment_name!r} is not active")
+    scope = "individual" if target_curve is not None else "combined_verification" if curve_parameters is not None else "global"
+    label = " | ".join(target_curve) if target_curve is not None else scope
     parent = client.create_run(experiment_id, tags={
-        "mlflow.runName": f"vwaps-tuning-{data_label}", "vwaps.data_label": data_label,
+        "mlflow.runName": f"vwaps-{label}-{data_label}", "vwaps.data_label": data_label,
         "vwaps.protocol": "calibration_grid_then_single_winner_holdout",
         "vwaps.tunable_fields": ",".join(EXPERIMENT_TUNABLE_FIELDS),
         "vwaps.curve_outputs": "enabled" if log_predictions else "disabled",
         "vwaps.curve_outputs_kind": "full_refill_with_originals",
+        "vwaps.search_scope": scope,
+        **({f"vwaps.{name}": value for name, value in zip(("product", "region", "unit"), target_curve)}
+           if target_curve is not None else {}),
+        **(run_tags or {}),
     })
     run_id = parent.info.run_id
     folder = root / run_id
-    tracker = _Tracker(client, entities, experiment_id, run_id, folder, cfg, len(candidates), log_predictions)
+    tracker = _Tracker(client, entities, experiment_id, run_id, folder, cfg, len(candidates), log_predictions,
+                       maps=maps, target_curve=target_curve, curve_parameters=curve_parameters)
     folder_initialized = False
     try:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
@@ -405,6 +468,14 @@ def run_tracked_tuning(
             "eex_offset_days": cfg.eex_offset_days,
         }.items()], synchronous=True)
         tracker.json(run_id, folder, "configuration.json", asdict(cfg))
+        tracker.json(run_id, folder, "search_context.json", {
+            "scope": scope, "target_curve": target_curve,
+            "production_configuration_mode": cfg.configuration_mode,
+            "mapping": [asdict(mapping) for mapping in maps],
+            "fixed_curve_parameters": [] if curve_parameters is None else [
+                {"curve_key": key, "parameters": value} for key, value in curve_parameters.items()],
+            "date_split": date_split, "tags": run_tags or {},
+        })
         tracker.json(run_id, folder, "grid.json", {"parameter_grid": parameter_grid, "candidates": candidates,
                                                  "validation_days": validation_days, "max_trials": max_trials})
         tracker.json(run_id, folder, "fingerprints.json", _fingerprints(cfg, vw, maps, books))
@@ -413,7 +484,9 @@ def run_tracked_tuning(
                                                 "data_label": data_label, "start": start, "end": end,
                                                 "log_predictions": log_predictions, "state": "RUNNING"})
         result = tune_parameters(cfg, vw, maps, books, start, end, parameter_grid, validation_days, max_trials,
-                                 observer=tracker, extended_grid=True, include_curve_outputs=log_predictions)
+                                 observer=tracker, extended_grid=True, include_curve_outputs=log_predictions,
+                                 target_curve=target_curve, curve_parameters=curve_parameters, date_split=date_split,
+                                 fixed_evaluation=fixed_evaluation)
         tracker.json(run_id, folder, "metadata.json", result.metadata)
         tracker.report(run_id, folder, "validation", result.validation_report)
         selected_id = result.metadata["selected_trial_id"]

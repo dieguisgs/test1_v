@@ -233,7 +233,7 @@ def test_each_invocation_has_an_independent_parent_directory(dataset, tmp_path, 
 
 @pytest.mark.parametrize("grid", [{"tenors": [["M+1"]]}, {"tau_log": [0]}, {"basis_mode": ["bad"]},
                                   {"shape_mode": ["bad"]}, {"shape_adjust_originals": ["false"]},
-                                  {"fallback_price_window": [1]}, {"min_volume": [0]}])
+                                  {"fallback_price_window": [1]}, {"min_volume": [-1]}])
 def test_invalid_grid_fails_before_tracking_or_engine_work(dataset, tmp_path, monkeypatch, grid):
     def forbidden(*args, **kwargs):
         pytest.fail("Invalid grids must fail before tracking or engine work")

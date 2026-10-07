@@ -18,6 +18,7 @@ from vwaps.dates import parse_reference_dates
 from vwaps.identity import CurveKey, curve_keys
 from vwaps.log import get_logger
 from vwaps.mapping import ProductMap
+from vwaps.product_config import effective_config
 from vwaps.tenors import resolve_tenor
 
 
@@ -148,6 +149,7 @@ def enrich_input(
             elif len(values) > 1:
                 ambiguous[curve].add(name)
     known = {m.key: m for m in maps}
+    settings = {m.key: effective_config(cfg, m) for m in maps if m.active}
     all_trace = ["reference_date", "product", "region", "unit", "tenor", "price", "source", "row_type", "flags"]
     all_trace += [c for c in filled if c not in ("data_origin", "estimation_method") and c not in all_trace]
     extra_cols = ["data_origin", "estimation_method", *[f"curve_{c}" for c in all_trace]]
@@ -162,6 +164,7 @@ def enrich_input(
                       curve_tenor=tenor, curve_row_type=row_type)
         flags = [_text(model.get("flag", ""))]
         m = known.get((product, region, unit))
+        curve_cfg = settings.get((product, region, unit), cfg)
         if m is None:
             flags.append("unmapped_product")
         elif m.use == "off":
@@ -189,7 +192,7 @@ def enrich_input(
                               curve_estimation_method_before_shape="none",
                               curve_data_origin_before_shape="original",
                               curve_shape_proposed_price=original_price + proposed_delta)
-                if (cfg.shape_mode == "adjust" and cfg.shape_adjust_originals
+                if (curve_cfg.shape_mode == "adjust" and curve_cfg.shape_adjust_originals
                         and model.get("shape_original_modified") is True):
                     delta = _number(model.get("shape_adjustment"))
                     final_price = original_price + delta
@@ -202,7 +205,7 @@ def enrich_input(
             price = _number(model.get("price"))
             available = not math.isnan(price) and model.get("source") != "missing"
             record.update(data_origin="estimated" if available else "missing",
-                          estimation_method=_method(model, cfg) if available else "none",
+                          estimation_method=_method(model, curve_cfg) if available else "none",
                           curve_price=price if available else math.nan,
                           curve_source=model.get("source", "missing"))
             if row_type == "original_invalid":

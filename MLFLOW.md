@@ -2,6 +2,11 @@
 
 [Español](MLFLOW.es.md) · [Notebook](notebooks/backtest_mlflow.ipynb) · [Backtest method](BACKTEST.md) · [README](README.md)
 
+Before interpreting results, read the worked examples of [which prices are hidden](BACKTEST.md#backtest-masking),
+[how metrics are calculated](BACKTEST.md#backtest-metrics), and [how the winner is selected](BACKTEST.md#backtest-selection).
+The [per-product configuration guide](CONFIGURATION.md) distinguishes fixed production values
+from the candidate grids compared in this notebook.
+
 This notebook runs the existing parameter tuner and records experiments in a local MLflow
 service. Start with the synthetic example, then use the same notebook on the computer that
 has your own VWAP and EEX files. MLflow organizes the evidence; the tuner decides which
@@ -54,13 +59,17 @@ deliberately favors those model families; it is not a neutral market benchmark.
 | `START_DATE`, `END_DATE` | ISO dates such as `"2026-09-01"`, inclusive. `None` uses the dataset's date bounds. |
 | `EEX_OFFSET_DAYS` | `None` retains `[eex].offset_days` in both synthetic and real mode. `0` permits a publication on the reference date; `-1` permits only T-1 calendar day or earlier. Any override must be a nonpositive integer. |
 | `VALIDATION_DAYS` | Number of latest eligible observation dates reserved for validation; the notebook example uses **5**. These are observation dates, not a five-calendar-day duration. |
-| `MAX_TRIALS` | Maximum Cartesian grid size; the example uses **24**. A larger grid fails before starting the run. |
+| `MAX_TRIALS` | Maximum combinations per search; the example uses **24**. Individual mode applies it to each product, not the campaign total. Oversized grids fail before trials start. |
 | `DEMO_SEED`, `DEMO_PERIODS` | Reproducible synthetic generation; default seed 7 and 30 periods. They do not affect real mode. |
 | `MLFLOW_PORT` | Local service port, initially **5000**. |
 | `MLFLOW_STORAGE` | Local experiment storage, initially `output/mlflow`, relative to the project root. |
 | `EXPERIMENT_NAME` | Groups related MLflow runs. Keep the same name to compare reruns. |
 | `LOG_PREDICTIONS` | Save individual paired backtest predictions **and full curve snapshots per trial**. `False` omits both. Real-data artifacts can contain observed own prices. |
 | `PARAMETER_GRID` | Explicit lists of candidate parameter values, described below. |
+| `SEARCH_SCOPE` | `"global"` searches for a shared combination; `"individual"` searches per complete identity. Independent of the production configuration mode. |
+| `SELECTED_CURVES` | `None` includes all active `fill` curves; otherwise a list of exact `product`, `region`, `unit` identities. Other active curves remain available as helpers. |
+| `PRODUCT_GRIDS` | Optional list of grids by identity. Each replaces the common grid for that product in full; axes are not silently merged. Individual searches only. |
+| `SEARCH_PLAN_PATH` | `None` uses notebook settings. A JSON path loads its grid and supplied search controls; omitted optional controls retain their notebook values. |
 | `STOP_SERVER` | Final cell: `False` leaves the UI running. Set `True` and execute that cell to stop the managed service. |
 
 `run.warmup_days` must be **0** for tuning, so the replay can use all supplied earlier own
@@ -76,7 +85,7 @@ means Sunday; the latest available publication may therefore be Friday. Its stal
 three days relative to Monday, not two relative to Sunday. The configured age limit still
 applies (`max_stale_days=0` means unlimited). Target tenors continue to resolve from T.
 
-This is a fixed scenario **outside `PARAMETER_GRID`**, not a thirtieth tunable field. Run the
+This is a fixed scenario **outside `PARAMETER_GRID`**. Run the
 notebook twice, for example with `EXPERIMENT_NAME="vwaps-offset-0"` and `"vwaps-offset-minus-1"`,
 keeping the same intended dates and grid. The setup cell prints the effective availability
 policy; the config snapshot and tuning metadata record it, and paired prediction files carry
@@ -95,6 +104,78 @@ keys and coverage before comparing. This is a date-level convention over supplie
 not an intraday publication clock or reconstruction of historical revision vintages.
 
 ## 3. Which parameters can be compared?
+
+### Production configuration and search scope are separate choices
+
+Each production Excel/CSV cell contains **one fixed value** for one product. Notebook/JSON
+grid entries contain **lists of candidates**. Searching never rewrites the mapping or TOML.
+
+| Production configuration | `SEARCH_SCOPE` | What is compared |
+|---|---|---|
+| `global` or `individual` | `global` | One shared combination across selected curves. Table overrides are ignored, including helper overrides. |
+| `global` | `individual` | One search per product, starting from global settings. Helpers retain that base. |
+| `individual` | `individual` | One search per product, starting from its effective mapping settings. Only its grid axes change; helpers retain their initial effective settings. |
+
+To reuse the same grid separately for every product:
+
+```python
+SEARCH_SCOPE = "individual"
+SELECTED_CURVES = None
+PRODUCT_GRIDS = []
+PARAMETER_GRID = {
+    "basis_mode": ["auto", "ratio", "additive"],
+    "layer_hist": ["off", "auto"],
+}
+```
+
+Two products mean six candidates per product: twelve calibration trials. Each may select a
+different winner. This does not search all 36 joint assignments. After selection, **all winners
+are checked together**, with fixed parameters, in one additional single-candidate run. This
+can expose CROSS interactions: changing a product's memory can change its signal to another.
+
+Searches share a chronological cutoff. The combined check reuses the same reserved dates
+and does not select parameters again; **it is not a second independent test set**. Each product
+needs at least two calibration observation dates and holdout observations with usable EEX;
+the common-case requirements still apply. Insufficient evidence produces an explanatory
+error, not an invented winning configuration.
+
+### Replace one product's grid or load a JSON plan
+
+`PRODUCT_GRIDS` contains full identities and replacement grids. For the synthetic demo:
+
+```python
+PRODUCT_GRIDS = [{
+    "product": "SYNTHETIC_POWER",
+    "region": "DE",
+    "unit": "EUR/MWh",
+    "parameter_grid": {"tau_log": [0.35, 0.75], "shrink_k": [0.5, 2.0]},
+}]
+```
+
+That product tests four distance/shrinkage combinations. It no longer explores `basis_mode`:
+the base value stays fixed. Products without an entry use `PARAMETER_GRID`. Unknown, duplicate
+or unselected identities fail validation.
+
+Alternatively set `SEARCH_PLAN_PATH = "notebooks/search_plan.example.json"`. The included
+[JSON example](notebooks/search_plan.example.json) works with both synthetic curves and supplies
+`search_scope`, `selected_curves`, `parameter_grid` and `product_grids`. Replace identities with
+your actual mapping for real data. The plan contains no input paths or executable instructions.
+`parameter_grid` is required; omitted optional controls retain their notebook values. Setup
+displays the scope and candidate counts before execution.
+
+Each search retains its MLflow parent/candidate runs, linked by `vwaps.campaign_id`. Parent
+names identify the product or combined check. The viewer selects those parents, then a
+candidate and date, without refitting anything.
+
+The `campaign_<id>` directory contains `campaign.json`, `summary.csv` and
+`proposed_product_parameters.json`. The last file contains full effective individual winner
+settings, **without applying them to production**. These files are also logged under `campaign/`
+in completed searches. Each trial logs `effective_curve_configurations.json`, including helpers,
+to preserve its effective settings context.
+`configuration_contexts.json` links row context identifiers to the mapping, availability
+policy and helper settings actually used by the engine.
+
+### Supported hyperparameters
 
 The default is six combinations:
 
@@ -119,6 +200,8 @@ its original six fields; this expanded grid belongs to the experiment API/notebo
 | `basis_mode` | `"auto"`, `"ratio"`, `"additive"` | How own prices are expressed relative to EEX. |
 | `tau_log` | Positive finite numbers | How quickly an anchor's weight decays with logarithmic delivery distance. |
 | `shrink_k` | Positive finite numbers | How strongly local evidence is pulled toward its permitted prior when evidence is weak. |
+| `min_volume`, `max_anchor_dev` | Finite numbers >= 0 | Candidate anchor filters; changing them does not shrink the campaign's evaluation population. Zero disables the deviation filter. |
+| `ratio_eex_floor`, `max_ratio_deviation` | Positive finite numbers | EEX stability floor and the permitted proportional-adjustment limit. |
 | `layer_hist` | `"off"`, `"auto"`, `"on"` | Whether/how the existing history layer is enabled; usable prior observations are still required. |
 | `layer_correlation` | `False`, `True` | The existing learned own-basis correlation weighting. It does not search for a best EEX-only anchor. |
 | `layer_cross` | `False`, `True` | The existing cross-curve prior, subject to its eligibility and evidence requirements. |
@@ -149,11 +232,18 @@ example values are candidates to investigate, not recommendations established wi
 `fallback_isolated` additionally disables local/history/cross to exercise fallback explicitly;
 it is a controlled branch comparison, not a comparison of the full production setup.
 
-Every omitted field remains fixed. Paths, mapping/identity, targets, delivery conventions,
-volume/outlier filters, ratio safety guards, EEX availability offsets/staleness and evaluation dates cannot be
-grid fields. Changing those could change which observations are being compared. An unsupported
-key is an error. To study such a change, design a separate evaluation with an explicitly
-comparable truth universe; do not treat unlike sample sets as the same competition.
+The grid accepts all **33 scalar model hyperparameters**. The `tenors` list is configurable
+per product in production but remains fixed during a search. Paths, identity, delivery
+conventions, EEX availability/staleness and evaluation dates are also excluded from grid axes.
+Unsupported keys raise an error.
+
+Notebook campaigns fix an evaluation population of valid own observations with EEX, disabling
+`min_volume` and `max_anchor_dev` only when deciding which truths enter the exam. Candidate
+filters still control usable anchors. A candidate therefore cannot remove difficult questions
+by raising its filter. Cases without EEX remain outside the exam. A standalone configured
+`backtest` retains its configured eligibility; its case counts need not match this expanded
+campaign population. Coverage and the common prediction intersection still determine the
+ranking described in section 4.
 
 Small focused grids are easier to interpret than multiplying every list together. For
 example, fallback settings may tie because leave-one-out still has other own anchors and
@@ -420,8 +510,19 @@ Keep enough earlier history for the methods you want to compare.
 
 ## 8. Verified execution
 
-On Windows with Python **3.14.2** and MLflow **3.17.0**, the complete suite passed **751 tests**
-in 51.34 seconds, with one upstream MLflow/SQLAlchemy deprecation warning. The notebook was
+The latest complete suite passed **857 tests** in 165.89 seconds on Windows with Python
+**3.14.2** and MLflow **3.17.0**, with one upstream MLflow/SQLAlchemy deprecation warning.
+The current notebook also completed end to end through the real Jupyter kernel in both
+search scopes: **global** with six candidates and EEX offset -1; **individual** with the
+example JSON's four German candidates, six French candidates, and one combined verification
+candidate at offset 0. All tracked runs finished. Each product winner saved 30 validation
+curve rows, and the combined check saved 60. Saved curves carried all four configuration
+provenance fields, and their context IDs resolved to the stored context documents. The
+saved-curve browser loaded without calling the engine again; the local UI returned HTTP
+200 and both managed services shut down. Jupyter emitted socket warnings during kernel
+shutdown after the checks completed; these did not fail the executions.
+
+Earlier availability-policy and viewer checks remain relevant: the notebook was
 executed through the actual `.venv` Jupyter kernel with both the default offset **0** and an
 explicit offset **-1**. The -1 run completed all six candidate children under one parent,
 with **25 calibration dates / 290 paired cases** and **5 validation dates / 58 cases** for

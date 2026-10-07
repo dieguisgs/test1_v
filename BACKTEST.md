@@ -12,6 +12,10 @@ command-line interface with its original six grid fields unless stated otherwise
 the same coverage-first objective and chronological winner-only validation. The notebook
 example reserves five dates; the CLI default remains twenty.
 
+For a product-manager reading path, start with [product settings](#backtest-product-settings),
+[what gets hidden](#backtest-masking), [worked error metrics](#backtest-metrics),
+[the exact selection rule](#backtest-selection) and [what the result cannot establish](#backtest-limits).
+
 ## 1. A curve can look plausible and still need explanation
 
 In the synthetic M+1/Q+2 example, EEX January, February and March all equal **150**. Additive
@@ -44,115 +48,510 @@ factor within this estimator; it is not another interpolation method. Ratio and 
 change basis coordinates and price conversion, not this distance geometry, when eligibility
 matches. Without history/cross, the prior adjustment is zero.
 
-## 3. What backtest and tune implement today
+## 3. What backtest and tuning actually do
 
-Errors target the **hidden own VWAP**, not EEX. EEX is an input and benchmark. Evaluate
-`pipeline_configured`: `local_*`, `hist_*` and `blend_*` are component diagnostics that need
-not reproduce production settings or its complete fallback behavior.
+The question is: **if one of our observed prices had been missing, how well would this
+configuration have estimated it from the information allowed at that time?** The answer
+being predicted is our hidden own VWAP. EEX provides a reference and a benchmark; matching
+EEX is not the objective.
 
-The CLI tune command supports six fields: `basis_mode`, `tau_log`, `shrink_k`, `layer_hist`,
-`layer_correlation`, `layer_cross`. It selects **one global configuration**, not separate
-parameters per curve. Other parameters remain fixed. The Cartesian grid is bounded by
-`--max-trials` (default 50).
+### 3.1 Three tools, with different jobs
 
-Selection first maximizes calibration coverage. Among those candidates, it minimizes the
-equal-weight-per-curve mean of `MAE_model/MAE_EEX`, scored on the prediction intersection of
-**all** candidates. Both errors use the same hidden originals. Coverage-first can choose a
-candidate with worse MAE: that tradeoff is an explicit business policy, not a mathematical
-guarantee of better predictions.
-If a curve's EEX MAE is zero, its ratio is defined as 1 when the model is also perfect,
-otherwise infinity.
+| Tool | Question it answers | What it does |
+|---|---|---|
+| `backtest` | How does the currently configured procedure behave on known prices that we temporarily hide? | Evaluates the configured pipeline and component diagnostics over the requested dates. It does not select parameters. |
+| `tune` | Which candidate in my supplied grid wins on earlier dates, and how does that winner perform later? | Compares configurations on calibration dates, selects one, then evaluates only that winner on validation dates. |
+| MLflow notebook | Can I define more model controls, retain the evidence and inspect each tested model? | Uses the same tuning rules, adds an expanded grid, saves reports and optional price artifacts, and provides experiment and curve viewers. |
 
-The latest **20 distinct eligible observation dates** are reserved by default. Only the
-selected candidate is evaluated there with fixed parameters; earlier originals continue
-updating history chronologically. Tune requires `warmup_days=0`.
+Use `pipeline_configured` to assess the deployed refill procedure, including the enabled
+fallback, reconstruction and shape steps. Rows named `local_*`, `hist_*`, `blend_*`,
+`local_corr_*` and similar are diagnostic calculations. Their settings and fallback
+behavior need not match the full production pipeline. They do not vote independently
+in tuning.
 
 ```powershell
 python run.py backtest
 python run.py tune --basis-modes auto,ratio,additive --hist-modes off,auto --validation-days 20 --max-trials 50
 ```
 
-The second command tests six configurations when other grid flags are omitted. It needs at
-least 22 eligible observation dates, including at least two calibration dates with predictions
-common to all candidates, and usable holdout EEX. The one-day M+1/Q+2 experiment cannot tune.
-Tune writes reports and a proposed configuration patch; it does not apply it automatically.
+With other grid flags omitted, that tuning command tests six configurations:
+three basis modes times two history modes. The CLI permits six search fields:
+`basis_mode`, `tau_log`, `shrink_k`, `layer_hist`, `layer_correlation` and `layer_cross`.
+Unspecified fields retain the configured values. `--max-trials` limits the Cartesian
+product of the supplied lists; its CLI default is 50.
 
-### Read the selection rule as a decision, not a certificate
+The [MLflow guide](MLFLOW.md) lists the additional notebook search fields, including
+model memory, fallback averaging and shape settings. Both interfaces use the same
+selection objective. A completed search produces a proposal; it does not change the
+production configuration or apply the winning parameters automatically.
 
-For each hidden observation, the truth is its **own VWAP**. Both the model and the EEX
-benchmark are compared against that truth. A curve means the full identity
-`(product, region, unit)`, not a tenor family. On the shared prediction cases of **all**
-calibration candidates, first calculate each curve's model MAE and EEX MAE, divide them,
-then average the curve ratios with equal weight.
+<a id="backtest-product-settings"></a>
 
-If own is 100, EEX 110 and the prediction 106, the errors are 10 and 6: in a one-case,
-one-curve illustration the score is **0.6**, a 40% error reduction relative to EEX. The
-target answer is 100; matching EEX is not the objective. Across curves, score **0.8** is
-not necessarily a 20% reduction in pooled absolute MAE. For two equally sampled EUR/MWh
-curves with `(EEX MAE, model MAE)` of `(10, 6)` and `(1, 1)`, the score is 0.8, while pooled
-MAE falls from 5.5 to 3.5, a 36.4% reduction. Different units must not be pooled at all.
-When EEX MAE is zero, zero model MAE gives ratio 1; nonzero model MAE gives infinity.
+### 3.2 Global production settings and individual product settings
 
-Before that score is considered, maximum calibration coverage wins. Candidate A with
-100/100 predictions outranks B with 99/100 even if B has lower common-case error. This
-prevents winning by abstaining on difficult cases, but one additional filled point can
-outweigh a large accuracy improvement. Cases outside the common prediction intersection
-affect coverage but not the common-case score. The denominator contains **eligible hidden
-own observations with EEX references**, not all unknown target prices in production.
+A curve is the exact **`(product, region, unit)`** identity. Product alone is not enough
+to distinguish regions or units; Month and Quarter remain families inside one curve.
 
-Equal curve weights avoid dominance by a large observation count and allow unitless
-cross-currency comparison. The tradeoff is equal voting power for sparse curves and
-sensitivity to tiny EEX baseline errors. Inspect per-unit absolute errors and sample sizes.
-An exact tie selects the first candidate in grid order. Only that winner is tested on later
-holdout dates; holdout errors do not choose the winner or update its selected parameters.
+Production now supports `[run].configuration_mode="global"` or `"individual"`. Global
+ignores optional model cells in the mapping. Individual applies nonempty cells over the
+global TOML values; blank cells inherit. All 33 scalar model controls and the `tenors`
+list are supported, with complete effective-value provenance in every calculated row.
+The mapping may be CSV or the first Excel sheet. It holds **one fixed value per parameter
+and curve**, not a list of candidates or a named preset. The existing `profile` column
+keeps its delivery-profile meaning. See [CONFIGURATION.md](CONFIGURATION.md) for the
+full registry, commands, inheritance and examples.
 
-**Smoothness, month/quarter coherence and changes across dates are not direct terms in the
-current ranking.** Shape can affect predictions and therefore error, but a visually cleaner
-curve or lower coherence residual is not separately rewarded. Inspect holdout results,
-contract families/horizons, coverage, large errors and shape before adopting a proposal.
-This evaluates the supplied grid and observed-price masking; it does not prove the best
-method for unavailable real prices. These limitations do not change the selection algorithm.
+Historical basis and skill remain separately learned for each curve and basis mode.
+Using the same history half-life does not pool all own prices. Optional CROSS can still
+connect curves through their raw-own basis surprises and history, not filled output prices.
 
-### Saved full curves and held-out predictions answer different questions
+The experiment scope is a separate notebook/JSON setting:
 
-The [MLflow notebook](MLFLOW.md) can display saved full curves for every calibration trial
+| Choice | Fixed starting settings | What gets selected |
+|---|---|---|
+| Configured `backtest` | Actual effective production configuration for each curve | Nothing: it evaluates the current settings. |
+| Global MLflow search | Global model settings, ignoring spreadsheet model overrides | One common candidate across the selected `fill` curves. |
+| Individual MLflow search | Each curve's effective base under the production selector | One candidate per selected full identity, keeping other curves' settings fixed as helpers. |
+
+In the notebook set `SEARCH_SCOPE`, `SELECTED_CURVES`, `PARAMETER_GRID` and, optionally,
+`PRODUCT_GRIDS`. `SEARCH_PLAN_PATH` can load the corresponding JSON plan. A product-specific
+grid **replaces** the common grid for that product; it does not merge additional axes.
+Unsearched fields retain their fixed base values. The 33 scalar model controls can be
+searched; targets, identities, operational availability and calendar conventions cannot.
+The production spreadsheet and plan remain unchanged by the search. CLI `tune` retains its
+six grid controls; use the notebook for per-product campaigns and expanded grids.
+
+Example: four candidates, two selected products. Global search evaluates four shared
+configurations and selects one. Individual search evaluates four candidates for A and four
+for B, selecting one for each. `MAX_TRIALS` applies to each search, not to the campaign's
+total. This is not a search over every possible combination of A and B's settings.
+
+Individual searches share one chronological split based on the selected curves' union of
+observation dates. Each scored product needs enough calibration and later-date evidence;
+an insufficient product is reported as an error rather than receiving an invented winner.
+Each search must retain predictions on at least two common calibration dates and usable
+holdout evidence. Unselected active curves remain available as helpers, not scored products.
+
+The completed individual campaign also replays all frozen winners together and logs a
+combined check, including their actual CROSS interactions. It reuses the **same reserved
+dates** and does not retune parameters. This is a joint configuration check, not a second
+independent final test. Repeatedly changing the plan after inspecting those dates uses up
+their status as untouched validation. The [MLflow guide](MLFLOW.md) explains the run tree,
+saved curves and plan format. A result remains a proposal; nothing is deployed automatically.
+
+<a id="backtest-masking"></a>
+
+### 3.3 What exactly gets hidden? A four-contract example
+
+Suppose that on September 30 we observe these contracts for one curve:
+
+| Contract label | Absolute delivery period | Own price |
+|---|---|---:|
+| `M+1` | October | 100 |
+| `M+2` | November | 120 |
+| `M+3` | December | 80 |
+| `Q+1` | October through December | 105 |
+
+These are invented observed prices for explaining masking, not a coherent-price benchmark
+or outputs promised by the estimator. Assume each contract passes the eligibility checks
+below and has a usable EEX reference.
+
+The backtest performs **four separate prediction exercises**:
+
+| Exercise | Temporarily hidden own contract | Other own contracts still visible that day | Truth used to score the prediction |
+|---|---|---|---:|
+| 1 | `M+1` | `M+2`, `M+3`, `Q+1` | 100 |
+| 2 | `M+2` | `M+1`, `M+3`, `Q+1` | 120 |
+| 3 | `M+3` | `M+1`, `M+2`, `Q+1` | 80 |
+| 4 | `Q+1` | `M+1`, `M+2`, `M+3` | 105 |
+
+For each exercise, the engine removes the hidden physical delivery period from the own
+prices and from both ratio and additive anchor lists. It reruns the configured target
+curve with that period hidden, then reads the estimate for the hidden contract. This
+allows reconstruction or shape to interact with the same target set used by the refill.
+The target's EEX reference remains available under the configured publication policy.
+
+**The hidden observation is restored before the next exercise.** Exercise 2 is not
+missing both M+1 and M+2. The four exercises represent four isolated gaps, not a single
+curve with four simultaneous gaps.
+
+Different input labels can describe the same physical delivery interval. Such aliases
+are aggregated into one own-period observation, and **all aliases of that interval are
+hidden together**. Leaving an equivalent label visible would reveal the answer through
+another name. A month and an overlapping quarter are different intervals, so hiding the
+month does not also hide the quarter. This distinction is one reason isolated masking
+can be easier than a real block of missing prices.
+
+Where multiple original rows represent the same interval, the held-out truth is their
+aggregated own price: positive finite volumes supply weights; zero or unknown volumes
+use weight 1. This is the engine's own-period observation, not a random transaction row.
+Original input rows remain unchanged.
+
+There is no configurable random percentage of observations to hide in this procedure.
+There is also no current option to hide three consecutive months or every own price on a
+day as one test case. Those are different experiments, described as proposals in
+[section 5](#5-proposed-protocol-complete-truth-realistic-missingness).
+
+### 3.4 Which observations can become backtest cases?
+
+An observation must pass all the following steps to enter the common EEX-evaluable
+test population:
+
+The table describes a configured `backtest` and the six-field CLI `tune`. MLflow campaigns
+freeze the scoring population without the last two filters, as explained below the table.
+
+| Check | What it means |
+|---|---|
+| Active `fill` identity | Its mapping is enabled, assigned to an EEX file and marked `use=fill`. Helpers can supply evidence but are not scored as output curves. |
+| Finite own price and resolvable tenor | Zero and negative own prices are allowed. The tenor must resolve on its own reference date. An originally missing own price cannot be scored because its truth is unknown. |
+| Positive delivery hours | The resolved period must have delivery hours under that curve's profile/calendar. A zero-hour Peak interval is not an eligible observation. |
+| Usable finite EEX reference | The period has a finite price available under the cutoff and age rules. It may be quoted directly or constructed from supported contracts; a direct contract row is not mandatory. |
+| Minimum volume | If the aggregated period volume is known and below `min_volume`, the observation is excluded. The aggregate sums known nonnegative volumes. All unknown volumes remain unknown and do not fail this check; known zero plus unknown volume aggregates to zero. |
+| Optional own/EEX deviation filter | If `max_anchor_dev > 0`, the relative difference must not exceed that limit. With `max_anchor_dev=0`, this filter is disabled. |
+
+The deviation calculation is:
+
+```text
+abs(own_price - eex_reference) / max(abs(eex_reference), ratio_eex_floor)
+```
+
+These common filters define the evaluation population before the method-specific ratio
+guards. A zero or near-zero EEX price, an incompatible sign, or a ratio outside
+`max_ratio_deviation` can make a price unusable **as a ratio anchor** without removing its
+otherwise eligible observation from evaluation. The pipeline must still try to predict
+that hidden case, and an abstention counts against coverage. This prevents a ratio
+candidate from improving its reported results simply by removing inconvenient cases
+from its denominator.
+
+The configured target-tenor list determines the regular output curve. It does **not**
+restrict which observed tenors can be tested. An eligible observed contract outside
+that list is added when the engine predicts its hidden period. No filter currently says
+"evaluate only monthly targets" merely because the output list contains months.
+
+Filtering changes the question being answered. Raising `min_volume` or rejecting large
+own/EEX differences can remove the very observations on which a method struggles.
+For a direct `backtest`, the configured volume/deviation filters define eligibility.
+The MLflow campaign freezes its scoring population with those two filters disabled, while
+each candidate's filters still control which visible observations can become model
+anchors and train its history. A candidate cannot remove a difficult answer from the
+exam by raising `min_volume` or tightening `max_anchor_dev`. Ratio guard parameters
+likewise affect the estimator rather than deleting scoring truths. Identities,
+calendars, target lists and EEX availability stay fixed across the grid. This distinction
+can give the campaign more cases than a direct filtered backtest of the same settings.
+The six-field CLI `tune` retains its fixed configured filters. Direct expanded API searches
+also freeze scoring eligibility when their grid varies those filters or the ratio floor.
+
+### 3.5 Dates, history and the number of prediction exercises
+
+Start and end dates are inclusive. Tuning first builds a chronological list of distinct
+dates with a finite own price, a resolvable tenor and an active `fill` identity. This is
+the union of dates across the included curves, not an independent split per product.
+Weekends can appear if observations exist on those dates.
+
+**Date selection happens before the full eligibility checks in section 3.4.** A date can
+enter this list and later contribute no EEX-evaluable case because of missing EEX,
+insufficient known volume or another common filter. Therefore `validation_days=5`
+does not guarantee five dates with successfully scored predictions.
+
+Suppose the requested interval contains **20 dates in that initial observation list**,
+and we reserve the last five for validation:
+
+| Part | Dates | Use |
+|---|---|---|
+| Calibration | The first 15 observation dates | Evaluate every candidate and select one configuration. |
+| Validation, also called holdout | The last 5 observation dates | Evaluate only the selected configuration. These errors do not select the winner. |
+
+Now assume four different delivery periods pass every eligibility check on each date:
+
+| Work | Calculation | Hidden prediction cases |
+|---|---|---:|
+| Calibration of one candidate | 15 dates x 4 periods | 60 |
+| Calibration of six candidates | 6 candidates x 60 cases | 360 |
+| Validation of the selected candidate | 5 dates x 4 periods | 20 |
+| Total pipeline prediction exercises | 360 + 20 | 380 |
+
+This is not 6 x 20 validation cases: nonwinning candidates are not evaluated on the
+holdout. These counts assume sufficient evidence and full eligibility; the number of
+available model predictions can be smaller. Raw diagnostic reports can contain several
+method rows for each case, so their row count is not the number of independent hidden
+observations.
+
+The CLI default reserves **20** observation dates, whereas the notebook example reserves
+**5**. At least two calibration dates must remain after splitting, and at least two
+distinct dates must have predictions common to all calibration candidates. In global search this minimum
+is across the scored population. In individual search each product is its own scored population.
+The CLI example in section 3.1 therefore needs at least 22 dates in the initial list,
+plus enough common predictions and usable holdout EEX. A one-date demonstration cannot
+support tuning.
+
+Earlier data are still useful. `warmup_days=0` means **replay all supplied earlier own
+history**, not "use no history"; tuning requires this setting. Choosing a later evaluation
+start does not discard earlier observations that can initialize historical adjustments.
+
+Within calibration or validation, the engine predicts a day's hidden cases before that
+day's own originals are learned. It then treats those originals as observed for later
+dates, subject to EEX availability. With a negative EEX offset, an historical pair is
+learned only after its same-date EEX becomes allowed; [section 3.9](#39-eex-availability-is-a-fixed-evaluation-scenario)
+details that release rule. Every candidate starts a fresh chronological replay, and the
+winner keeps fixed parameters during validation.
+
+This is an **isolated-gap prediction exercise followed by normal historical learning**.
+It does not simulate a price that remains unavailable in every future historical update.
+A persistent gap needs a different masking protocol.
+
+<a id="backtest-metrics"></a>
+
+### 3.6 What do the errors and coverage columns mean?
+
+For one curve and one price unit, imagine three hidden observations:
+
+| Case | Hidden own price | Model prediction | Raw EEX benchmark | Model error: prediction minus own | Absolute model error | Absolute EEX error |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 100 | 103 | 110 | +3 | 3 | 10 |
+| 2 | 120 | 116 | 110 | -4 | 4 | 10 |
+| 3 | 80 | 85 | 90 | +5 | 5 | 10 |
+
+The resulting metrics are:
+
+```text
+Model MAE  = (3 + 4 + 5) / 3                    = 4
+Model RMSE = sqrt((3^2 + (-4)^2 + 5^2) / 3)     = 4.08248
+Model bias = (3 - 4 + 5) / 3                    = 1.33333
+EEX MAE    = (10 + 10 + 10) / 3                 = 10
+Score      = Model MAE / EEX MAE                = 0.4
+Skill      = 1 - Score                         = 0.6
+```
+
+MAE says the average error magnitude is 4 price units. RMSE gives larger errors more
+influence through squaring. Positive bias means the predictions are higher on average;
+negative bias means lower. Positive and negative errors can cancel in bias, which is why
+a bias near zero does not imply small errors.
+
+The score of 0.4 here means 40% of the benchmark's MAE, or 60% lower MAE than EEX.
+It does **not** mean the model is 40% away from the own price. This direct reduction
+interpretation applies to this one-curve, same-sample illustration; the global score
+across several curves is calculated differently, as explained next.
+
+The raw EEX benchmark is evaluated even though the production pipeline does not use an
+unsmoothed EEX-only fallback. A benchmark is a comparison calculation, not an instruction
+to publish that benchmark price.
+
+Accuracy must be read together with coverage:
+
+| Field in tuning reports | Meaning |
+|---|---|
+| `n_baseline` | Eligible hidden own observations with a usable EEX reference: the coverage denominator. |
+| `n_available` | Those baseline observations for which this candidate produced a finite pipeline prediction. |
+| `n_missing` | `n_baseline - n_available`. |
+| `coverage` | `n_available / n_baseline`. It counts predictions, not volume, delivery hours or every possible production gap. |
+| `n_paired` | Cases actually used for error metrics: the intersection across all candidates during calibration; available winner predictions during validation. |
+| `n_paired_dates` | Distinct dates represented by those scored cases. |
+| `n_curves` | Full product/region/unit identities represented by those scored cases. |
+
+For example, `n_baseline=100`, `n_available=95` and `n_missing=5` mean 95% coverage.
+If other grid candidates reduce the shared calibration sample to 80 cases, this candidate's
+`n_paired` is 80, even though it predicted 95 prices. It is essential to inspect both counts.
+
+These fields describe tuning reports and the corresponding MLflow metrics. The CLI
+`backtest` method summaries also report method-level error diagnostics and paired
+comparisons; their row counts must not be mistaken for the tuning grid's common sample.
+
+Within a curve's MAE, each scored observation has equal weight. A large trade does not
+get more error weight than a small trade, and a longer delivery period does not get more
+error weight than a shorter one. Volumes and hours can affect the estimate or eligibility;
+they do not weight the final error observations.
+
+Absolute MAE, RMSE and bias are reported **by price unit**. Tuning's overall absolute-error
+fields are blank, rather than adding EUR/MWh and GBP/MWh errors together. The overall
+score is dimensionless. The per-unit MAE averages cases within that unit; it is not the
+same calculation as averaging equally weighted curve-level error ratios.
+
+If the winner produces no validation predictions but EEX-evaluable cases exist, validation
+coverage is zero and its error score is unavailable. That is not zero error or perfect
+performance. MLflow omits nonfinite numeric metrics and retains their state in audit
+JSON; unavailable and infinite scores must not be read as ordinary zero values.
+
+<a id="backtest-selection"></a>
+
+### 3.7 Exactly how is the winner selected?
+
+The current rule has two priorities, in this order:
+
+1. **Maximize calibration coverage.** Only candidates with the largest `n_available`
+   can win. All candidates must have the same baseline observation keys, own truths,
+   EEX references and available EEX policy metadata.
+2. **Compare accuracy on a common sample.** Take the observations predicted by
+   **every candidate in the supplied grid**, including candidates that cannot win
+   on coverage. For each curve, compute the model MAE and EEX MAE on those same cases.
+   Divide the first by the second, then average those curve ratios with equal curve
+   weights. The smallest score among the coverage-eligible candidates wins.
+
+An exact tie selects the first candidate in grid order. The selection does not use
+validation errors, P95 errors, smoothness, month/quarter residuals or the number of
+parameters. `normalized_skill` is `1 - score` and therefore gives the same ranking as
+score on the same sample; it is not a second optimization objective.
+
+**Why use a ratio to EEX?** A 5-unit error can be small for one curve and large for another.
+Comparing each curve with its own EEX benchmark gives a dimensionless measure. Giving
+each curve the same weight also prevents a curve with many observations from automatically
+dominating a sparse one. The tradeoffs are equal voting power for sparse curves and
+sensitivity to a very accurate EEX benchmark.
+
+For two equally sampled curves expressed in the same unit:
+
+| Curve | EEX MAE | Model MAE | Curve error ratio |
+|---|---:|---:|---:|
+| A | 10 | 6 | 0.6 |
+| B | 1 | 1 | 1.0 |
+
+```text
+Global score = (0.6 + 1.0) / 2 = 0.8
+Pooled EEX MAE, in this equally sampled same-unit example = 5.5
+Pooled model MAE                                           = 3.5
+Pooled MAE reduction                                       = 36.36%
+```
+
+A global score of 0.8 is therefore **not generally a 20% reduction in pooled MAE**.
+Different units must not be pooled at all. With unequal case counts, the distinction
+between case-weighted absolute errors and equal-curve scoring becomes even more important.
+
+**What if EEX's error is zero or almost zero?** For a curve with EEX MAE exactly zero:
+
+- Model MAE zero gives a ratio of 1: both are perfect.
+- Any positive model MAE gives infinity: the model is worse than an exact benchmark.
+
+A very small nonzero denominator is used as it stands. EEX MAE 0.01 and model MAE 1
+produce a ratio of 100. The `ratio_eex_floor` parameter guards ratio-based price
+adjustments; it does **not** put a floor under the scoring denominator. Inspect
+absolute errors and sample sizes when a nearly exact benchmark dominates the score.
+If all eligible candidates have the same infinite score, the usual first-candidate
+tie rule still applies; a selected proposal is not necessarily a good model.
+
+**What is the consequence of coverage taking priority?** A candidate with 100 predictions
+out of 100 outranks a candidate with 99 out of 100, even if the latter has dramatically
+lower common-case MAE. The rule discourages winning by refusing difficult cases, but
+one extra filled price can outweigh a large accuracy improvement. This is an explicit
+tradeoff in the implemented policy, not a guarantee of a better curve.
+
+**Can adding another grid candidate change the result even if it cannot win? Yes.**
+The common sample includes the predictions shared by *all* candidates. Consider one
+curve with one test case on each of three distinct calibration dates. EEX's absolute
+error is 10 in every case:
+
+| Case/date | Candidate A absolute error | Candidate B absolute error | Candidate C absolute error |
+|---|---:|---:|---:|
+| 1 | 0 | 10 | 0 |
+| 2 | 100 | 0 | Missing prediction |
+| 3 | 0 | 0 | 0 |
+
+With only A and B, all three cases are common. A's MAE is 33.3333 and B's is 3.3333:
+**B wins**. Add C, and the common sample becomes cases 1 and 3. A's common-case MAE
+becomes 0 and B's becomes 5: **A wins**. C has only 2/3 coverage and is ineligible,
+but its abstention removed A's large error from the accuracy comparison. Cases 1 and 3
+span two dates, so the implemented minimum common-date requirement is still satisfied.
+
+The error of 100 has not disappeared from the saved prediction evidence. It simply
+falls outside the sample used for that grid's ranking. For this reason, record the
+whole candidate grid, coverage, `n_paired` and common-case membership. A score belongs
+to a specific grid and evaluation sample; scores from different grids are not
+automatically comparable. More candidates do not necessarily make the selection
+criterion more informative.
+
+### 3.8 Saved full curves and masked predictions answer different questions
+
+The [MLflow notebook](MLFLOW.md) displays saved full curves for every calibration trial
 and for the winner's validation stage. They retain the day's available own observations;
 **they are not LOO curves with the scored own observation removed**. Use those charts for
-shape, month/quarter differences, rollover behavior and temporal changes, and use held-out
-metrics/predictions for accuracy. Seeing an original price reproduced on a full-curve chart
-is not a successful prediction test.
+shape, month/quarter differences, rollover behavior and temporal changes. Use the masked
+predictions and their reports to assess accuracy. Seeing an original price reproduced
+on a full-curve chart is not a successful prediction test.
 
-When `LOG_PREDICTIONS=True`, child runs store `curves/calibration_filled.csv` and, for the
-selected candidate, `curves/validation_filled.csv`, alongside paired prediction files.
-`False` omits both individual predictions and full curves. The viewer reads persisted
-artifacts, including older saved experiments, without recomputing them from current data.
-If an older run did not save full curves, create a new experiment to obtain them; a missing
-artifact is not reconstructed and passed off as that original run's output.
+With `LOG_PREDICTIONS=True`, each child trial stores:
 
-### EEX availability is a fixed evaluation scenario
+| Artifact path | Contents |
+|---|---|
+| `curves/calibration_filled.csv` | Full calibration-stage refill for that candidate, with own observations visible. |
+| `curves/validation_filled.csv` | Full validation-stage refill; present only for the selected candidate. |
+| `predictions/calibration_paired_predictions.csv` | Hidden own truths, raw EEX benchmarks and pipeline predictions, including common-sample membership after scoring. |
+| `predictions/validation_paired_predictions.csv` | The winner's hidden-case validation evidence. |
 
-`eex.offset_days=0` permits publications through the reference date T; `-1` restricts them
-to T-1 calendar day or earlier. Choose it in the TOML, use `--eex-offset-days -1` in `backtest`
-or `tune`, or set `EEX_OFFSET_DAYS=-1` in the experiment notebook. It is not a candidate field
-in either grid. The same cutoff applies to the raw EEX benchmark, pipeline references and
-fallback price/spread windows. Delivery targets still resolve from T.
+The paired files retain abstentions from the EEX baseline population; the model prediction
+is missing for those cases. These are the files to inspect when a candidate's coverage
+and common-case accuracy tell different stories.
 
-Historical learning with a negative offset releases original Own_h/EEX_h pairs only when
-`h<T` and `h<=T+offset_days`, preserving h for decay/expiry. It never learns a stale-date pair.
-LOCAL and HIST remain usable; current CROSS surprises require same-day EEX and therefore
+`LOG_PREDICTIONS=False` omits both individual paired predictions and full curves.
+Aggregate reports and metadata are still recorded. Saved full curves come from the
+existing tuning engine runs; opening them does not rerun the model.
+
+The viewer reads persisted artifacts, including previously saved experiments, without
+loading today's production inputs or EEX files. If an older run did not save full curves,
+create a new experiment to obtain them. A missing artifact is never reconstructed and
+presented as that original run's output.
+
+### 3.9 EEX availability is a fixed evaluation scenario
+
+`[eex].offset_days=0` permits publications through the reference date T; `-1` restricts
+them to T-1 calendar day or earlier, and `-2` to T-2 or earlier. Choose it in the TOML,
+use `--eex-offset-days -1` in `backtest` or `tune`, or set `EEX_OFFSET_DAYS=-1` in the
+experiment notebook. It is not a candidate field in either grid. The same cutoff applies
+to the raw EEX benchmark, pipeline references and fallback price/spread windows.
+Delivery targets still resolve from T.
+
+Historical learning with a negative offset releases original Own_h/EEX_h pairs only
+when `h<T` and `h<=T+offset_days`, preserving the observation date h for historical
+timestamps and expiry. It requires same-date EEX_h; it never learns own_h against an
+older EEX snapshot. Historical observations are released once, not learned again on
+every forecast date.
+
+LOCAL and HIST remain usable. Current CROSS surprises require same-day EEX and therefore
 contribute no current cross adjustment with negative offsets, even if `layer_cross=True`.
-Cross covariances can still learn exact historical pairs; local correlation weights remain usable.
+Cross covariances can still learn exact historical pairs; local correlation weights
+remain usable.
 
-For Monday with offset -1, the cutoff is Sunday. A Friday publication is three days old
-relative to Monday; a `max_stale_days=2` limit rejects it. Zero maximum age remains unlimited.
-Audit `eex_offset_days`, `eex_cutoff_date` and `eex_asof` in LOO/paired prediction files and
-the availability policy recorded in tuning metadata.
+For Monday with offset -1, the cutoff is Sunday. A Friday publication is **three days
+old relative to Monday**; a `max_stale_days=2` limit rejects it. Setting
+`[eex].max_stale_days=0` in the TOML means unlimited age. Audit `eex_offset_days`,
+`eex_cutoff_date` and `eex_asof` in LOO/paired prediction files and the availability
+policy recorded in tuning metadata.
 
 Compare offset 0 and -1 as separate, labeled runs with the same intended dates and masking.
-Do not infer that a lower score proves a better model: the policy can change the benchmark
-and which own observations are EEX-evaluable. Report coverage and common observation keys;
-use an explicitly matched comparison before attributing differences to forecast quality.
-CSV publication dates provide a date-level convention, not historical intraday/revision visibility.
+A lower score alone does not establish a better model: the policy can change the EEX
+benchmark and which own observations are EEX-evaluable. Report coverage and common
+observation keys; use an explicitly matched comparison before attributing differences
+to forecast quality. CSV publication dates provide a date-level convention, not historical
+intraday availability or revision visibility.
+
+<a id="backtest-limits"></a>
+
+### 3.10 What can we conclude, and what remains untested?
+
+| Question | What the current procedure can say |
+|---|---|
+| Why hide known prices if the real objective is unknown ones? | Known prices supply answers against which predictions can be checked. This gives evidence about the estimator on those cases; the truly unknown prices cannot provide their own test answers. |
+| Does a good score prove the actual missing prices are correct? | No. Observed prices can differ systematically from missing ones in liquidity, horizon or market regime. The masking experiment is evidence about its tested population. |
+| Is the own VWAP an unquestionable fair value? | No. It is the implemented target and can contain noise, outliers or inconsistent aggregates. Common filters and source quality matter. |
+| Are all curves being filled independently? | They have separate own histories, but optional helpers/CROSS can connect them. Global search chooses one shared candidate; individual search chooses one per identity and then checks the winners together. |
+| Does a good one-gap result establish performance on several missing months? | No. Other same-day own observations remain visible in each test. Block gaps, no-own-price days and persistent missingness require different masks. |
+| Does the best score identify the best-looking or most coherent shape? | No. Shape is not a direct scoring term. It can affect hidden predictions, but smoothness and aggregation residuals are not separately rewarded. |
+| Can the grid find the universally best parameters? | No. It compares the supplied combinations under one fixed data and availability scenario. Untried configurations, future regimes and different missingness remain untested. |
+| Can I repeatedly change the grid after seeing validation? | You can run another experiment, but those dates have then influenced your choices. They no longer provide an untouched final check. |
+| Do synthetic results or passing software tests establish real-market accuracy? | No. They validate mechanics and performance within the invented assumptions, not unknown real prices. |
+
+For a product manager, the proposed configuration means: **among these candidates, on
+these observed-price masking cases, this one satisfied our coverage priority and had
+the best common-case score; this is how it then performed on later dates**. It does not
+mean that every missing price is known, every product improved, or every aggregation
+relationship is consistent.
+
+Before adopting a proposal, read its later-date validation, coverage, sample counts,
+absolute errors by unit and the underlying paired predictions. Inspect the saved full
+curves separately for shape, unusual contract relationships and rollover changes.
+A smooth chart and a low error score answer different questions.
+
+[Section 5](#5-proposed-protocol-complete-truth-realistic-missingness) describes proposed
+block masking, persistent gaps and repeated-origin validation. Those are not hidden
+features of the current command or notebook. The later sections retain the shape and
+anchor investigations and distinguish implemented controls from suggested extensions.
 
 ## 4. What hiding one period can establish
 
@@ -165,11 +564,13 @@ With only observed M+1 and Q+2, this can test predicting either from remaining e
 It cannot establish the accuracy of an unobserved M+3. Hiding one point differs from losing
 a block of months or every own observation that day.
 
-Evaluated originals need EEX and must pass common filters such as `min_volume` and
-`max_anchor_dev`. Tune coverage therefore concerns **EEX-evaluable observations**, not all
-requested gaps. Do not improve reported accuracy by filtering away difficult cases. Comparing
-filters requires an independently fixed evaluation universe; neither the CLI nor the expanded notebook grid
-vary those filters.
+Evaluated originals need EEX. Direct `backtest` and the six-field CLI `tune` also apply their
+fixed volume/deviation filters. The expanded notebook supports varying `min_volume` and
+`max_anchor_dev` using a separately frozen scoring population with those filters disabled;
+their candidate values still affect visible anchors and historical learning. Ratio guard
+parameters are searchable too. Coverage still concerns **EEX-evaluable own observations**,
+not every requested unknown gap. Candidate abstentions continue to affect coverage and the
+common prediction intersection; freezing eligible truths does not remove those scoring limits.
 
 ## 5. Proposed protocol: complete truth, realistic missingness
 
@@ -208,10 +609,12 @@ are proposals, not fields already provided by the standard reports.
 
 ## 7. Parameter families: what to compare deliberately
 
-The CLI grid varies the six fields listed above. The [experiment notebook](MLFLOW.md) also
-supports model-memory, fallback and shape fields, using flat Python names listed in that guide.
-Omitted and unsupported fields stay fixed. This table is an experiment map, not an instruction
-to optimize every setting or vary observation filters inside a shared ranking.
+The CLI grid varies the six fields listed above. The [experiment notebook](MLFLOW.md)
+supports all 33 scalar model fields, including memory, fallback, shape, anchor filters and
+ratio guards, using the flat Python names listed in that guide. Its scoring population is
+frozen independently of candidate filters as explained in section 3.4. Omitted model fields
+stay fixed; targets and operational/data-meaning settings remain outside the grid. This table
+is an experiment map, not an instruction to optimize every setting.
 
 | Family | Relevant controls |
 |---|---|

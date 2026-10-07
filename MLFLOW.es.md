@@ -2,6 +2,11 @@
 
 [English](MLFLOW.md) · [Notebook](notebooks/backtest_mlflow.ipynb) · [Método del backtest](BACKTEST.es.md) · [README](README.es.md)
 
+Antes de interpretar los resultados, consulta los ejemplos de [qué precios se ocultan](BACKTEST.es.md#backtest-masking),
+[cómo se calculan las métricas](BACKTEST.es.md#backtest-metrics) y [cómo se selecciona el ganador](BACKTEST.es.md#backtest-selection).
+La [configuración por producto](CONFIGURATION.es.md) distingue los valores fijos de producción
+de las mallas de candidatos que se comparan en este notebook.
+
 Este notebook ejecuta el comparador de parámetros existente y registra los experimentos en
 un servicio local de MLflow. Puedes empezar con el ejemplo sintético y usar después el mismo
 notebook en el ordenador que tiene tus VWAPs y EEX. MLflow organiza las pruebas; el comparador
@@ -54,13 +59,17 @@ modelos; no es un benchmark de mercado neutral.
 | `START_DATE`, `END_DATE` | Fechas ISO como `"2026-09-01"`, incluidas ambas. `None` utiliza los límites del dataset. |
 | `EEX_OFFSET_DAYS` | `None` respeta `[eex].offset_days` tanto en modo sintético como real. `0` permite publicación en T; `-1` solo hasta T-1 día natural o anteriores. Debe ser un entero no positivo. |
 | `VALIDATION_DAYS` | Número de últimas fechas de observación elegibles reservadas para validar; el ejemplo usa **5**. Son fechas con observaciones, no necesariamente cinco días naturales. |
-| `MAX_TRIALS` | Máximo de combinaciones cartesianas; el ejemplo usa **24**. Un grid mayor falla antes de arrancar el experimento. |
+| `MAX_TRIALS` | Máximo de combinaciones por búsqueda; el ejemplo usa **24**. En individual se aplica a cada producto, no a la suma de la campaña. Un grid mayor falla antes de arrancar los ensayos. |
 | `DEMO_SEED`, `DEMO_PERIODS` | Generación sintética reproducible; semilla 7 y 30 periodos por defecto. No afectan al modo real. |
 | `MLFLOW_PORT` | Puerto del servicio local, inicialmente **5000**. |
 | `MLFLOW_STORAGE` | Carpeta local de experimentos, inicialmente `output/mlflow`, relativa a la raíz del proyecto. |
 | `EXPERIMENT_NAME` | Agrupa ejecuciones relacionadas en MLflow. Mantén el nombre para comparar nuevas ejecuciones. |
 | `LOG_PREDICTIONS` | Guarda predicciones individuales emparejadas **y curvas completas por candidato**. `False` omite ambas. Con datos reales pueden contener precios propios observados. |
 | `PARAMETER_GRID` | Listas explícitas de valores candidatos, explicadas debajo. |
+| `SEARCH_SCOPE` | `"global"` busca una combinación común; `"individual"` busca una por identidad completa. Es independiente del modo de configuración de producción. |
+| `SELECTED_CURVES` | `None` incluye todos los productos activos `fill`; o una lista de identidades explícitas `product`, `region`, `unit`. Las otras curvas activas conservan su función de ayuda. |
+| `PRODUCT_GRIDS` | Lista opcional de mallas por identidad. La malla de un producto sustituye por completo a la común para él; no mezcla ejes a escondidas. Solo se admite en búsqueda individual. |
+| `SEARCH_PLAN_PATH` | `None` usa los valores del notebook. Una ruta JSON carga la malla y los controles de alcance presentes en ese archivo; los controles opcionales omitidos conservan el valor del notebook. |
 | `STOP_SERVER` | Última celda: `False` mantiene abierta la interfaz. Pon `True` y ejecuta esa celda para detener el servicio gestionado. |
 
 `run.warmup_days` debe ser **0** al comparar parámetros para poder reproducir todo el propio
@@ -76,7 +85,7 @@ la última publicación disponible puede ser la del viernes. Tiene tres días de
 respecto al lunes, no dos respecto al domingo. Sigue aplicándose el límite de antigüedad
 (`max_stale_days=0` significa ilimitado). Los tenors se siguen resolviendo desde T.
 
-Es un escenario fijo **fuera de `PARAMETER_GRID`**, no un trigésimo campo del grid. Ejecuta
+Es un escenario fijo **fuera de `PARAMETER_GRID`**. Ejecuta
 el notebook dos veces, por ejemplo con `EXPERIMENT_NAME="vwaps-offset-0"` y
 `"vwaps-offset-minus-1"`, conservando las fechas previstas y el grid. La preparación muestra
 la política efectiva; el snapshot del config y los metadatos la guardan. Los archivos de
@@ -96,6 +105,80 @@ cobertura. Es una convención diaria sobre CSVs suministrados, no un reloj de pu
 intradía ni una reconstrucción de las revisiones disponibles históricamente.
 
 ## 3. ¿Qué parámetros se pueden comparar?
+
+### Configuración de producción y búsqueda son decisiones independientes
+
+En el Excel/CSV del mapping cada celda contiene **un valor fijo** para un producto. En el
+notebook o JSON cada parámetro contiene **una lista de candidatos**. El backtest no escribe
+sus ganadores en el mapping ni cambia el TOML.
+
+| Configuración de producción | `SEARCH_SCOPE` | Qué se compara |
+|---|---|---|
+| `global` o `individual` | `global` | Una combinación común para las curvas elegidas. Se ignoran las excepciones de la tabla, también para las ayudas. |
+| `global` | `individual` | Una búsqueda por producto, cada una partiendo de los valores globales. Las ayudas conservan esa base. |
+| `individual` | `individual` | Una búsqueda por producto, partiendo de su configuración efectiva del mapping. Solo los ejes de su malla cambian; las ayudas conservan su configuración efectiva inicial. |
+
+Para comparar la misma malla por producto basta con:
+
+```python
+SEARCH_SCOPE = "individual"
+SELECTED_CURVES = None
+PRODUCT_GRIDS = []
+PARAMETER_GRID = {
+    "basis_mode": ["auto", "ratio", "additive"],
+    "layer_hist": ["off", "auto"],
+}
+```
+
+Con dos productos son seis candidatos por producto: doce ensayos de calibración. Cada
+producto puede elegir una combinación distinta. No se prueban las 36 asignaciones conjuntas.
+Después se comprueban **todos los ganadores juntos**, con sus parámetros fijados, mediante
+una ejecución adicional de un solo candidato. Esta comprobación puede revelar efectos de
+CROSS: cambiar la memoria de un producto puede cambiar la señal que aporta a otro.
+
+Las búsquedas comparten un corte cronológico. La comprobación conjunta reutiliza el mismo
+tramo reservado y no vuelve a seleccionar parámetros; **no es un segundo test independiente**.
+Cada producto necesita al menos dos fechas observadas de calibración y observaciones en
+validación con EEX utilizable; además siguen aplicándose los requisitos de casos comunes.
+La falta de evidencia produce un error explicativo, no un ganador inventado.
+
+### Cambiar la malla de un producto o cargar un JSON
+
+`PRODUCT_GRIDS` contiene identidad completa y una malla sustitutiva. Ejemplo para la demo:
+
+```python
+PRODUCT_GRIDS = [{
+    "product": "SYNTHETIC_POWER",
+    "region": "DE",
+    "unit": "EUR/MWh",
+    "parameter_grid": {"tau_log": [0.35, 0.75], "shrink_k": [0.5, 2.0]},
+}]
+```
+
+Este producto prueba cuatro combinaciones de distancia y contracción. `basis_mode` ya no
+se explora para él: conserva su valor base. Los productos sin entrada siguen usando
+`PARAMETER_GRID`. Una identidad desconocida, repetida o no seleccionada genera error.
+
+También puedes poner `SEARCH_PLAN_PATH = "notebooks/search_plan.example.json"`. El
+[JSON incluido](notebooks/search_plan.example.json) funciona con las dos curvas sintéticas
+y contiene `search_scope`, `selected_curves`, `parameter_grid` y `product_grids`.
+Para datos reales cambia las identidades por las de tu mapping. No contiene rutas a datos
+ni instrucciones ejecutables. El archivo exige `parameter_grid`; los demás campos son
+opcionales. La celda de preparación muestra el alcance y número de candidatos antes de lanzar.
+
+Cada búsqueda mantiene sus ejecuciones padre/candidatos en MLflow, enlazadas por
+`vwaps.campaign_id`. El nombre del padre identifica el producto o la comprobación conjunta.
+El visor permite elegir esos padres y después candidato/fecha, sin volver a calcular.
+
+La carpeta `campaign_<id>` contiene `campaign.json`, `summary.csv` y
+`proposed_product_parameters.json`. Este último guarda los valores efectivos completos de
+los ganadores individuales, **sin aplicarlos a producción**. Los mismos documentos se
+adjuntan en `campaign/` a las ejecuciones terminadas. Cada candidato guarda también
+`effective_curve_configurations.json`, incluyendo las ayudas, para auditar el contexto.
+`configuration_contexts.json` enlaza los identificadores de contexto de las filas con el
+mapping, disponibilidad y configuraciones de ayuda realmente usados por el motor.
+
+### Hiperparámetros admitidos
 
 El ejemplo inicial tiene seis combinaciones:
 
@@ -120,6 +203,8 @@ originales; el grid ampliado pertenece al notebook/API de experimentos.
 | `basis_mode` | `"auto"`, `"ratio"`, `"additive"` | Cómo se expresa la diferencia entre propio y EEX. |
 | `tau_log` | Números finitos positivos | La rapidez con que pierde peso un ancla al aumentar la distancia logarítmica de entrega. |
 | `shrink_k` | Números finitos positivos | Cuánto se acerca la señal local a su prior permitido cuando hay poca evidencia. |
+| `min_volume`, `max_anchor_dev` | Números finitos >= 0 | Filtros de anclas del candidato; la muestra de evaluación de la campaña no se recorta al cambiarlos. Cero desactiva el filtro de desviación. |
+| `ratio_eex_floor`, `max_ratio_deviation` | Números finitos positivos | Umbral de estabilidad EEX y máximo ajuste proporcional admisible. |
 | `layer_hist` | `"off"`, `"auto"`, `"on"` | Si/cómo se habilita la capa histórica existente; sigue necesitando observaciones anteriores utilizables. |
 | `layer_correlation` | `False`, `True` | La ponderación existente aprendida de correlaciones entre basis propios. No busca el mejor ancla usando solo EEX. |
 | `layer_cross` | `False`, `True` | El prior entre curvas existente, sujeto a sus requisitos de elegibilidad y evidencia. |
@@ -151,12 +236,18 @@ no recomendaciones demostradas con datos reales.
 `fallback_isolated` además desactiva local/histórico/cross para ejercitar explícitamente el
 fallback: es una comparación controlada de esa rama, no de toda la configuración de producción.
 
-Todo campo omitido permanece fijo. No pueden ser campos del grid las rutas, mapping/identidad,
-tenors, convenciones de entrega, filtros de volumen/extremos, protecciones del ratio, antigüedad
-EEX, offset de disponibilidad ni fechas de evaluación. Cambiarlos podría cambiar las observaciones que se comparan.
-Una clave no admitida genera error. Para estudiar ese cambio, diseña otra evaluación con un
-universo de verdad explícitamente comparable; no presentes muestras distintas como la misma
-competición.
+El grid admite los **33 hiperparámetros escalares** del modelo. La lista `tenors` es configurable
+por producto en producción, pero permanece fija durante la búsqueda. Tampoco son ejes del
+grid rutas, identidad, convenciones, antigüedad/disponibilidad EEX ni fechas de evaluación.
+Una clave no admitida genera error.
+
+En las campañas del notebook se fija un universo de propios válidos con EEX, sin aplicar
+`min_volume` ni `max_anchor_dev` al decidir qué verdades se examinan. Esos filtros sí afectan
+a las anclas utilizadas por cada candidato. Así un candidato no elimina sus preguntas difíciles
+del examen por subir un filtro. Los casos sin EEX siguen fuera. El comando `backtest` de una
+configuración mantiene su comportamiento de elegibilidad configurada; no confundir sus
+recuentos con el universo ampliado de la campaña. La cobertura y la intersección común siguen
+determinando el ranking descrito en el apartado 4.
 
 Es más fácil interpretar grids pequeños centrados en una pregunta que multiplicar todas
 las listas. Por ejemplo, los parámetros del fallback pueden empatar porque al ocultar un
@@ -426,8 +517,20 @@ histórico previo para las técnicas que quieras comparar.
 
 ## 8. Ejecución comprobada
 
-En Windows con Python **3.14.2** y MLflow **3.17.0**, la suite completa pasó **751 tests** en
-51,34 segundos, con un aviso de deprecación de MLflow/SQLAlchemy. Se ejecutó el notebook en
+La última suite completa pasó **857 tests** en 165,89 segundos en Windows con Python
+**3.14.2** y MLflow **3.17.0**, con un aviso externo de deprecación de MLflow/SQLAlchemy.
+También se ejecutó el notebook actual de principio a fin en el kernel Jupyter real con
+ambos alcances: **global**, con seis candidatos y offset EEX -1; **individual**, con los
+cuatro candidatos alemanes, seis franceses y una verificación conjunta del JSON de ejemplo,
+con offset 0. Todos los runs terminaron. Cada ganador individual guardó 30 filas de curva
+de validación, y la comprobación conjunta guardó 60. Las curvas incluyeron los cuatro campos
+de trazabilidad de configuración, y sus IDs de contexto correspondían a los documentos
+guardados. El visor abrió las curvas sin volver a llamar al motor; la interfaz respondió
+HTTP 200 y ambos servicios gestionados se detuvieron. Jupyter emitió avisos de sockets al
+cerrar los kernels después de las comprobaciones; no hicieron fallar las ejecuciones.
+
+También se conservan las comprobaciones anteriores de disponibilidad y del visor: se
+ejecutó el notebook en
 el kernel Jupyter real de `.venv` tanto con el offset predeterminado **0** como con **-1**
 explícito. La ejecución -1 completó las seis hijas candidatas bajo un padre, con **25 fechas
 de calibración / 290 casos emparejados** y **5 fechas de validación / 58 casos** solo para

@@ -23,9 +23,12 @@ region/unit values are literal identities, never wildcards. Product names cannot
 
 **Optional post-processing:** [shape](SHAPE.md) is implemented and off by default. It can audit or adjust existing finite curve prices. Original curve prices can move only with `shape.adjust_originals=true`; raw input columns remain intact.
 
+
+**Global or individual configuration is implemented:** `[run].configuration_mode` selects `global` (default, ignores individual cells) or `individual` (applies each curve's nonempty CSV/Excel mapping cells). All 33 scalar model controls and the `tenors` list can be overridden; these are not closed presets. [CONFIGURATION.md](CONFIGURATION.md) documents the 34 columns, inheritance, CLI precedence, daily/refill/catchup behavior and provenance. Global or per-product MLflow search is a separate choice: Excel stores fixed values, while the notebook/JSON stores candidate grids.
+
 ## Minimum setup to get started
 
-You do not need to tune all 59 entries. **19 are paths, column names and time zones**, not
+You do not need to tune all 60 entries. **19 are paths, column names and time zones**, not
 statistical parameters. Start by reviewing `[paths]`, generating and reviewing the mapping,
 choosing `[targets].tenors`, and keeping `method.basis_mode = "auto"`. Retain the other
 initial values, including `correlation = false`, `cross = false`, `arbitrage = false` and `shape.mode = "off"`.
@@ -53,6 +56,14 @@ first, how the equal-curve model/EEX error score works, and why shape is reviewe
 
 ## Install
 
+On the machine containing your real data, clone the source repository or copy its source
+files and documentation into a working directory. No archive is required:
+
+```powershell
+git clone https://github.com/dieguisgs/test1_v.git
+cd test1_v
+```
+
 Requires Python 3.11 or later. From the project directory, use either:
 
 ```powershell
@@ -68,15 +79,24 @@ python -m venv .venv
 
 The examples below use `python` from that environment. In PowerShell, activate it with `.venv\Scripts\Activate.ps1`, use `.venv\Scripts\python.exe` directly, or prefix commands with `uv run` when using uv.
 
+Create the environment on the destination machine; do not copy `.venv` from another computer.
+For both notebooks and local MLflow, install the optional groups with
+`uv sync --group notebook --group experiment` and select that environment as the notebook
+kernel. Notebook explanations, code and interfaces are in English; the Markdown guides
+are available in English and Spanish.
+
 ## Configure the real input
 
-There is **one configuration file, `config.toml`**, both here and in the portable ZIP. Its
+There is **one main configuration file, `config.toml`**, in the source repository. Its
 initial input path is `data/vwaps.xlsx`: edit that path to the real accumulated input on the
 destination machine. All ordinary `python run.py ...` commands use this configuration.
 For a separate demonstration run, explicitly pass `--vwap data/synthetic_vwaps.csv` if that
 synthetic file has been generated; the default never silently selects demonstration data.
 
-The portable ZIP excludes the local mapping, synthetic inputs, EEX data, virtual environment and generated outputs. Install dependencies on the destination machine, supply your input and EEX files, and generate the mapping there.
+Real inputs, EEX data, the local mapping, virtual environment and generated outputs are not
+published. Supply your own input and EEX files on the destination machine, configure their
+paths below, and generate/review the mapping there. The repository's fictional mapping example
+contains disabled rows; it does not replace your real product assignments.
 
 Edit `[paths]` in the selected configuration:
 
@@ -114,7 +134,7 @@ The target list is editable directly in the configuration; no Python changes are
 tenors = ["D+1", "D+2", "WE", "M+1", "M+2", "M+3", "Q+1", "Cal+1"]
 ```
 
-Edit the existing section to extend or reduce this list. It applies to all `fill` products. Original rows outside the list remain preserved; missing rows outside it are not created. A listed tenor is estimated only when the available data support it.
+Edit the existing section to extend or reduce this global list. In global mode it applies to all `fill` products; individual mode permits a `tenors` JSON cell per mapping identity. Original rows outside the list remain preserved; missing rows outside it are not created. A listed tenor is estimated only when the available data support it.
 
 ## Choose a calculation mode
 
@@ -275,7 +295,7 @@ anchor_months = 2
 These controls do not change originals or prices with local/historical/cross adjustments.
 Price and spread windows are independent: neither must be larger than the other.
 Maximum staleness governs the latest accepted snapshot; it does not turn the windows into
-calendar-day windows. The 59 configuration keys include these five controls.
+calendar-day windows. The 60 configuration keys include these five controls.
 
 Override them for one `daily`, `refill`, `catchup`, `backtest` or `tune` execution:
 
@@ -427,7 +447,7 @@ saving changes. Peak Day/Weekend uses 12 hours every day; other Peak kinds use M
 
 | Parameter | Default | Effect of changing it |
 |---|---|---|
-| `targets.tenors` | `D+1..D+3`, `WE..WE+3`, `BOW`, `W+1..W+4`, `BOM`, `M+1..M+10`, `Q+1..Q+8`, `Sum+1..Sum+3`, `Win+1..Win+3`, `Cal+1..Cal+3` | Edit the actual string list to add/remove target rows for every `fill` product; original rows outside it remain preserved |
+| `targets.tenors` | `D+1..D+3`, `WE..WE+3`, `BOW`, `W+1..W+4`, `BOM`, `M+1..M+10`, `Q+1..Q+8`, `Sum+1..Sum+3`, `Win+1..Win+3`, `Cal+1..Cal+3` | Global target list; individual mode can override it per curve. Original rows outside the effective list remain preserved. |
 | `conventions.day` | `"calendar"` | `"business"` interprets D+n as Monday–Friday business-day offsets; no holiday calendar is supplied |
 | `conventions.weekend_offset` | `0` | Shifts own WE+n by this many weekends when resolving delivery periods |
 
@@ -473,6 +493,7 @@ are mapped `fill` or `helper` products. Surprises, covariances and β remain sep
 
 | Parameter | Default | Effect of changing it |
 |---|---|---|
+| `configuration_mode` | `"global"` | `global` ignores mapping model cells; `individual` applies nonempty per-curve values. See [CONFIGURATION.md](CONFIGURATION.md). |
 | `warmup_days` | `0` | 0 rebuilds from all prior original history supplied; positive N restricts warmup to N calendar days and can make a daily run differ from a longer refill |
 
 This setting does not retrieve missing files. Supply accumulated originals and the matching
@@ -537,7 +558,7 @@ a matching price source before support can be added.
 
 ## Run
 
-After setting the paths in the single `config.toml`, here or in the extracted portable ZIP:
+After setting the paths in `config.toml` on the machine where the source and real data reside:
 
 ```powershell
 python run.py mapping
@@ -755,7 +776,7 @@ better prediction or continuity at calendar rollover.
 
 ### Complete [shape] configuration
 
-These seven entries bring the supplied configuration to 59 keys. Defaults are uncalibrated
+These seven entries bring the supplied configuration to 60 keys. Defaults are uncalibrated
 starter values. Detailed formulas, examples, solver diagnostics and history needs are in
 [SHAPE.md](SHAPE.md).
 

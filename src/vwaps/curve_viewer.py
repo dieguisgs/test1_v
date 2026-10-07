@@ -57,6 +57,7 @@ def create_curve_viewer(frame: pd.DataFrame) -> Widget:
             "reference_date", "tenor", "tenor_aliases", "kind", "delivery_start", "delivery_end",
             "price", "eex_settle", "eex_asof", "eex_age_days", "eex_cutoff_date", "eex_offset_days", "source", "data_origin",
             "own_vwap", "price_before_shape", "shape_mode", "shape_status", "shape_adjustment", "flag",
+            "configuration_mode", "configuration_id", "configuration_context_id", "configuration_parameters",
         ]
         display(frame[[name for name in fields if name in frame]].reset_index(drop=True))
 

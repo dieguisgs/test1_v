@@ -18,7 +18,8 @@ from vwaps.visualization import load_output
 
 
 PROTOCOL = "calibration_grid_then_single_winner_holdout"
-RUN_COLUMNS = ["run_id", "run_name", "status", "start_time", "data_label", "eex_offset_days"]
+RUN_COLUMNS = ["run_id", "run_name", "status", "start_time", "data_label", "eex_offset_days",
+               "search_scope", "campaign_id", "campaign_state"]
 TRIAL_COLUMNS = ["run_id", "trial_id", "selected", "status", "parameters",
                  "calibration_curves", "validation_curves", "calibration_score", "calibration_coverage"]
 CURVE_ARTIFACTS = {stage: f"curves/{stage}_filled.csv" for stage in ("calibration", "validation")}
@@ -80,6 +81,9 @@ def list_experiment_runs(tracking_uri: str, experiment_name: str, *, limit: int 
             "start_time": pd.to_datetime(run.info.start_time, unit="ms", utc=True),
             "data_label": run.data.tags.get("vwaps.data_label", ""),
             "eex_offset_days": run.data.params.get("eex_offset_days", "0"),
+            "search_scope": run.data.tags.get("vwaps.search_scope", "global"),
+            "campaign_id": run.data.tags.get("vwaps.campaign_id", ""),
+            "campaign_state": run.data.tags.get("vwaps.campaign_state", ""),
         })
     return pd.DataFrame(rows, columns=RUN_COLUMNS)
 

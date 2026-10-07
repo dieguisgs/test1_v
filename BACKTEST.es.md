@@ -11,6 +11,10 @@ Aquí `tune` se refiere al comando CLI con sus seis campos originales salvo indi
 Ambos usan el mismo criterio de cobertura primero y validación cronológica solo del ganador.
 El ejemplo del notebook reserva cinco fechas; el valor predeterminado del CLI sigue siendo veinte.
 
+Para empezar por las dudas prácticas: [configuración por producto](#backtest-product-settings),
+[qué y cuántos precios se ocultan](#backtest-masking), [qué significan las métricas](#backtest-metrics),
+[cómo se elige al ganador](#backtest-selection) y [qué no demuestra la evaluación](#backtest-limits).
+
 ## 1. Qué significa «mejor relleno»
 
 El objetivo principal es recuperar precios propios que faltan. EEX aporta información, pero
@@ -51,80 +55,346 @@ solapados. El [ejemplo auditado](ALGORITMO.md#local-month-quarter-example) conti
 
 ## 3. Qué hacen hoy backtest y tune
 
-`backtest` oculta un periodo propio de una fecha, incluidas sus etiquetas equivalentes, lo
-estima y compara con el original. Conserva los otros contratos del día. Retira el periodo antes
-de seleccionar ratio/aditivo y aprende la fecha después de predecirla. Para valorar el resultado
-desplegado, lee **`pipeline_configured`**: `local_*`, `hist_*` y `blend_*` son diagnósticos y no
-todos reproducen las capas, la reducción o el respaldo de producción.
+### 3.1. La idea, explicada como una prueba de producto
 
-`tune` compara una rejilla limitada de configuraciones y selecciona **una configuración global**:
+Imagina una tabla de precios con casillas completas y vacías. En una casilla realmente vacía
+no conocemos la respuesta: no podemos comprobar directamente si rellenarla con 100 o con
+110 es correcto. En una casilla completa sí tenemos una respuesta observada. La tapamos,
+pedimos al algoritmo que la reconstruya y después destapamos el número para medir el error.
 
-1. Reserva las últimas 20 fechas distintas de observaciones para validar, salvo otro valor de
-   `--validation-days`. Calibra sobre las anteriores; exige `warmup_days=0`.
-2. Usa las mismas observaciones evaluables para todos los candidatos. Primero prefiere la
-   **máxima cobertura** de calibración.
-3. Entre esos candidatos, compara el error en la intersección de casos predichos por **todos**.
-   Calcula `MAE_modelo/MAE_EEX` por identidad y promedia dando igual peso a cada curva.
-4. El menor score gana; un empate favorece el primer candidato. Evalúa solo al ganador sobre
-   las fechas posteriores, sin elegir parámetros utilizando sus errores.
+Esto responde a **«¿cómo reconstruye un precio observado cuando se lo retiro y mantengo
+las demás pistas disponibles?»**. Es útil porque compara configuraciones contra una respuesta
+común y comprobable. Su capacidad para representar huecos reales depende de que esas pruebas
+se parezcan a los huecos que habrá que rellenar. Un precio líquido observado y un vencimiento
+que nunca tiene operaciones no son necesariamente situaciones equivalentes.
 
-Score 1 iguala el error de EEX; 0.8 mejora un 20 % ese error normalizado medio por curva. No es
-el porcentaje de aciertos ni necesariamente la reducción del MAE monetario global. EEX sigue
-siendo un benchmark diagnóstico aunque no se permita copiarlo como respaldo de producción.
-Si el MAE de EEX es cero para una curva, el cociente se define como 1 cuando el modelo también
-es perfecto, e infinito en otro caso. Si el ganador no predice ningún caso de validación,
-su cobertura es cero y el error no es evaluable, no cero.
+La respuesta del examen es **el precio propio observado**, no EEX. Si el propio vale 120,
+EEX 112, el candidato A estima 119 y B estima 114, sus errores absolutos son 1 y 6; EEX tiene
+error 8. A acierta más en ese caso aunque se aleje más de EEX. El VWAP observado es una
+referencia medible de nuestras operaciones; no por ello es un precio teórico perfecto ni
+necesariamente simultáneo con los settlements de todos los demás contratos.
 
-**La cobertura tiene prioridad, no es una puntuación combinada con el error.** Un candidato
-que predice 100 casos puede ganar frente a otro que predice 99 aunque este tenga menor MAE.
-Además, los casos fuera de la intersección cuentan para cobertura, pero no para el error común
-de selección. Esta política debe encajar con el coste que tenga dejar un hueco sin rellenar.
+| Herramienta | Qué hace | Qué decisión toma |
+|---|---|---|
+| `backtest` | Oculta conocidos uno por uno y evalúa una configuración, además de diagnósticos por técnica. | No busca automáticamente parámetros ni reserva por sí solo un tramo para elegir ganador. |
+| `tune` | Repite ese examen para una rejilla de candidatos en fechas anteriores y valida al ganador en fechas posteriores. | Propone una configuración común para los productos evaluados. |
+| Notebook MLflow | Ejecuta esa búsqueda, permite una rejilla ampliada y guarda parámetros, métricas y artefactos. | Utiliza el criterio de `tune`; MLflow registra y muestra, no decide qué significa «mejor». |
 
-La cobertura se refiere a propios evaluables con EEX, no a todos los huecos objetivo. Los
-filtros generales de anclas también condicionan qué propios se evalúan. Para comparar distintos
-filtros habría que fijar un universo independiente; excluir casos difíciles no debe confundirse
-con estimarlos mejor. No se evalúan aquí objetivos sin referencia EEX.
+La búsqueda no modifica automáticamente la configuración de producción. Los ejemplos
+numéricos de este apartado son didácticos; no son resultados obtenidos con datos reales.
 
-La validación es cronológica con aprendizaje diario: originales de una fecha de validación
-ya pasada pueden alimentar fechas posteriores. No simula un bloque que permanece sin propios.
-Tampoco repite actualmente varios cortes temporales ni da incertidumbre sobre el ganador.
+<a id="backtest-product-settings"></a>
 
-### Leer la elección como una decisión, no como un certificado
+### 3.2. Configuración global, individual y búsqueda por producto
 
-La verdad de cada observación ocultada es **su VWAP propio**. Modelo y EEX se comparan con
-ese mismo precio. Una curva es la identidad `(product, region, unit)`, no la familia de tenor.
-En los casos predichos por **todos** los candidatos de calibración, se calcula primero el MAE
-de modelo y EEX para cada curva, se dividen y se promedian los cocientes dando igual peso a
-cada identidad.
+La curva es la identidad exacta **`(product, region, unit)`**. El nombre de producto no
+basta para distinguir regiones o unidades; Month y Quarter son familias de esa misma curva.
 
-Si el propio es 100, EEX 110 y la predicción 106, los errores son 10 y 6: en este ejemplo de
-un caso/curva el score es **0.6**, una reducción del error del 40% frente a EEX. La respuesta
-buscada es 100: parecerse a EEX no es el objetivo. Entre varias curvas, **0.8** no equivale
-necesariamente a un 20% menos de MAE absoluto conjunto. Dos curvas EUR/MWh con igual número
-de casos y `(MAE EEX, MAE modelo)` de `(10, 6)` y `(1, 1)` dan score 0.8, pero su MAE conjunto
-baja de 5.5 a 3.5: un 36.4%. No se pueden mezclar errores absolutos de distintas unidades.
-Si EEX tiene MAE cero, un modelo exacto recibe cociente 1; cualquier error recibe infinito.
+Producción admite `[run].configuration_mode="global"` o `"individual"`. Global ignora las
+celdas opcionales de modelo del mapping. Individual aplica las no vacías sobre el TOML;
+las vacías heredan. Se admiten los 33 controles escalares y la lista `tenors`, y cada fila
+calculada registra los valores efectivos. El mapping puede ser CSV o la primera hoja Excel.
+Guarda **un valor fijo por parámetro y curva**, no mallas de candidatos ni perfiles cerrados.
+La columna `profile` conserva el significado de perfil de entrega. Véase
+[CONFIGURATION.es.md](CONFIGURATION.es.md) para todas las columnas, comandos y ejemplos.
 
-Antes del score se prioriza cobertura máxima: A con 100/100 predicciones gana a B con 99/100
-aunque B tenga menor error en los casos comunes. Evita ganar por abstenerse ante casos
-difíciles, pero un punto adicional rellenado puede imponerse a una mejora grande de precisión.
-Los casos fuera de la intersección afectan a cobertura, no al score común. Su denominador
-son **propios ocultados elegibles con referencia EEX**, no todos los huecos reales de producción.
+La base histórica y su evaluación siguen separadas por curva y modo de ajuste. Usar la
+misma memoria no mezcla todos los precios propios. CROSS puede conectar curvas mediante
+sorpresas de bases propias e históricos, no mediante sus precios de relleno ya calculados.
 
-El peso igual por curva evita que domine una por tener muchas observaciones y permite
-comparar sin mezclar monedas. A cambio, una curva con pocos datos vota igual que otra con
-muchos y un error EEX diminuto puede dominar los cocientes. Mira errores absolutos por unidad
-y tamaños de muestra. Un empate exacto elige el primer candidato del grid. Solo el ganador
-pasa a las fechas posteriores de validación; sus errores no lo eligen ni cambian sus parámetros.
+El alcance del experimento es otra elección del notebook/JSON:
 
-**Suavidad, coherencia mes/trimestre y saltos entre fechas no son términos directos del
-ranking actual.** Shape puede afectar predicciones y error, pero una curva más bonita o un
-residuo menor no reciben un premio independiente. Revisa validación, familias/horizontes,
-cobertura, errores grandes y forma antes de aceptar la propuesta. Se evalúan este grid y
-este enmascarado de conocidos; no se demuestra qué es mejor para precios reales que no
-tenemos. Esta explicación no modifica el algoritmo de selección.
+| Opción | Configuración fija de partida | Qué selecciona |
+|---|---|---|
+| `backtest` configurado | La configuración efectiva de producción de cada curva | Nada: evalúa los valores actuales. |
+| Búsqueda MLflow global | Valores globales; ignora excepciones de modelo del Excel | Un candidato común para las curvas `fill` seleccionadas. |
+| Búsqueda MLflow individual | Base efectiva de cada curva según el selector de producción | Un candidato por identidad, manteniendo las otras curvas fijas como helpers. |
 
-### Curvas completas y predicciones ocultadas responden preguntas distintas
+En el notebook se indican `SEARCH_SCOPE`, `SELECTED_CURVES`, `PARAMETER_GRID` y, si hace
+falta, `PRODUCT_GRIDS`. `SEARCH_PLAN_PATH` permite cargar un JSON con el plan. Una malla
+específica de producto **sustituye** a la común para ese producto; no añade sus ejes por
+mezcla. Los campos no explorados mantienen su valor fijo. Se pueden buscar los 33 controles
+escalares; objetivos, identidades, disponibilidad operativa y convenciones quedan fijos.
+La búsqueda no cambia el Excel ni el plan. El CLI `tune` conserva sus seis campos: usa el
+notebook para campañas individuales y mallas ampliadas.
+
+Ejemplo: cuatro candidatos y dos productos. En global se prueban cuatro configuraciones
+comunes y se elige una. En individual se prueban cuatro para A y cuatro para B, eligiendo
+una para cada uno. `MAX_TRIALS` limita cada búsqueda, no el total de la campaña. No se
+exploran todas las combinaciones conjuntas posibles de valores para A y B.
+
+Las búsquedas individuales comparten el corte cronológico obtenido de la unión de fechas
+de los productos seleccionados. Cada producto evaluado necesita evidencia suficiente antes
+y después del corte; si no la tiene se informa del error, sin inventar un ganador. Cada
+búsqueda necesita predicciones comunes en al menos dos fechas de calibración y evidencia
+EEX utilizable en validación. Las curvas activas no seleccionadas siguen como helpers,
+sin puntuar como productos objetivo.
+
+La campaña individual terminada también ejecuta juntos todos los ganadores con parámetros
+fijos y registra una comprobación combinada, incluidas sus interacciones CROSS. Usa **las
+mismas fechas reservadas** y no vuelve a optimizar. Es una comprobación conjunta, no un
+segundo examen final independiente. Cambiar repetidamente la malla después de mirar esas
+fechas hace que dejen de ser validación intacta. La [guía MLflow](MLFLOW.es.md) explica
+registros, curvas guardadas y formato del plan. El resultado es una propuesta; no se
+despliega automáticamente.
+
+<a id="backtest-masking"></a>
+
+### 3.3. ¿Cuántos reales oculta? Uno cada vez, pasando por todos los elegibles
+
+La técnica se llama **leave-one-out (LOO)**: dejar uno fuera. No escoge un porcentaje aleatorio
+ni mantiene ocultos simultáneamente todos los precios que va evaluando.
+
+Para un producto y una fecha con M+1, M+2, M+3 y Q+1 elegibles hace estas cuatro pruebas:
+
+| Prueba independiente | Precio propio ocultado | Propios que siguen visibles ese día |
+|---|---|---|
+| 1 | M+1 | M+2, M+3 y Q+1 |
+| 2 | M+2 | M+1, M+3 y Q+1 |
+| 3 | M+3 | M+1, M+2 y Q+1 |
+| 4 | Q+1 | M+1, M+2 y M+3 |
+
+En cada prueba retira el precio del periodo tanto de los propios como de las anclas de ambos
+modos antes de decidir ratio/aditivo. Ejecuta el pipeline configurado para los objetivos,
+incluidas las capas habilitadas y shape si corresponde, y busca la predicción del contrato
+ocultado. El precio retirado no puede actuar como original protegido en shape. El resto de
+contratos y el histórico anterior utilizable siguen disponibles.
+
+Después de cada prueba vuelve a partir de los datos del día: las ocultaciones **no se
+acumulan**. Ocultar M+2 no significa haber perdido también M+1 porque se examinó antes.
+Las operaciones se hacen en memoria; no borran los precios de los CSV de entrada.
+
+**Se oculta un periodo físico completo.** Si dos etiquetas representan exactamente las mismas
+fechas de entrega, se agrupan y se retiran juntas para no dejar una copia de la respuesta.
+Por ejemplo, el 29 de septiembre, para Base y convención diaria natural, D+1 y BOM entregan
+ambos desde el 30 de septiembre hasta el 1 de octubre (fin excluido). No se puede tapar una
+etiqueta y conservar la otra como pista. Las observaciones equivalentes se consolidan con
+pesos de volumen positivo; volumen cero o desconocido usa peso 1. Esa consolidación cuenta
+como un caso, no como varias pruebas independientes.
+
+Un trimestre y uno de sus meses **no** son alias: sus periodos son distintos. Por eso Q+1
+puede seguir visible cuando se evalúa uno de sus meses. Si están disponibles los otros dos,
+puede haber mucha más información que en un hueco real que afecte a todo el trimestre.
+
+### 3.4. Qué precios entran en el examen y cuáles quedan fuera
+
+No todo valor presente en el CSV se convierte automáticamente en un caso de evaluación:
+
+Esta lista describe `backtest` configurado y el CLI `tune` de seis campos. Las campañas
+MLflow fijan la población sin los dos últimos filtros, como se explica debajo de la lista.
+
+1. La identidad debe estar activa como `fill`, con referencia EEX asignada. `helper` puede
+   aportar información, pero no se evalúa como curva de salida; `off` queda excluido.
+2. Tiene que haber precio propio finito, tenor interpretable y horas de entrega positivas
+   según el perfil y la zona horaria del mapping.
+3. Debe existir un precio EEX finito para ese periodo: directo o reconstruible por el motor
+   de referencias, respetando la fecha de corte y la antigüedad permitida.
+4. Si el volumen consolidado es conocido, debe superar o igualar `method.min_volume`.
+   Se suman los volúmenes conocidos: todos desconocidos dejan el total desconocido, pero
+   un cero conocido más otros desconocidos deja total cero. El total desconocido no se
+   rechaza por este filtro. Por defecto el mínimo es 0.
+5. Si `method.max_anchor_dev > 0`, se exige que
+   `abs(own - eex) / max(abs(eex), ratio_eex_floor)` no supere ese límite. Por defecto es 0,
+   que desactiva este filtro.
+
+Las guardas que impiden usar una observación como ancla de **ratio** no la eliminan por sí
+solas del conjunto evaluado. Ser un caso del examen y ser una pista admisible para una fórmula
+son dos decisiones distintas. Los originales se conservan aunque no sirvan como anclas.
+
+**La lista `targets.tenors` no limita actualmente qué conocidos examina LOO.** Si el objetivo
+de salida contiene solo meses, pero también hay D+1 elegibles en el input, esos diarios pueden
+participar en la evaluación. Dentro de una curva cada caso pesa igual en el MAE: muchos diarios
+pueden influir más que unos pocos calendarios. El peso igual por curva no equilibra familias.
+
+En un `backtest` directo, los filtros configurados de volumen y desviación definen la
+elegibilidad. La campaña MLflow fija en cambio su población de examen desactivando esos dos
+filtros para seleccionar las verdades. Los valores de cada candidato siguen filtrando
+las anclas visibles y el aprendizaje de su propio modelo: subir `min_volume` o endurecer
+`max_anchor_dev` no permite borrar respuestas difíciles del examen. Las guardas ratio
+también afectan al estimador sin eliminar verdades evaluadas. Identidades, calendario,
+objetivos y disponibilidad EEX permanecen fijos en la malla. Por eso la campaña puede
+examinar más casos que un backtest directo filtrado con los mismos parámetros. El CLI
+`tune` de seis campos conserva sus filtros configurados fijos. Una búsqueda API ampliada
+también fija la población si su malla varía esos filtros o el umbral ratio.
+
+Actualmente **no existe un argumento para ocultar dos precios a la vez, el 40 %, una familia
+completa o varios días consecutivos**. Esas pruebas están propuestas en el apartado 5. Tampoco
+se mide con este LOO el caso de rellenar un objetivo sin ninguna referencia EEX construible.
+
+### 3.5. Fechas, número de pruebas e histórico disponible
+
+En `backtest`, `--from` y `--to` delimitan las fechas a evaluar. En el notebook se usan
+`START_DATE` y `END_DATE`, ambos incluidos. El tuning identifica las fechas distintas con
+observaciones propias válidas y tenors interpretables de curvas activas `fill`, y reserva las
+últimas `VALIDATION_DAYS`. Son fechas con observaciones, **no días naturales ni número de
+precios**. La división por fechas se hace antes de conocer cuántos casos pasarán todos los
+requisitos EEX/filtros del apartado anterior; no garantiza igual número de casos por fecha.
+
+Ejemplo de una curva, con 20 fechas de observación y cuatro periodos elegibles en cada una:
+
+| Parte | Fechas | Casos ocultados por candidato | Uso |
+|---|---:|---:|---|
+| Calibración | Las primeras 15 | 15 × 4 = 60 | Comparar combinaciones y elegir una. |
+| Validación con `VALIDATION_DAYS=5` | Las últimas 5 | 5 × 4 = 20 | Evaluar únicamente la combinación elegida. |
+
+Con seis combinaciones se ejecutan **6 × 60 = 360 casos de calibración** y **20 de validación**
+para el ganador. Se trata de 80 observaciones distintas examinadas repetidamente, no de 380
+precios independientes. Son casos intentados; una configuración puede dejar algunos sin
+predicción. Las filas de métodos diagnósticos y las curvas completas generan otros recuentos.
+
+| Control | Qué controla | Qué no controla |
+|---|---|---|
+| `START_DATE` / `END_DATE` | Intervalo de referencia evaluado. | No eliminan necesariamente el histórico anterior usado para aprender. |
+| `VALIDATION_DAYS` | Últimas fechas de observación reservadas para el ganador; ejemplo del notebook: 5. CLI `--validation-days`: 20 por defecto. | No es un porcentaje de precios ocultos. |
+| `PARAMETER_GRID` | Listas de valores que se combinan para crear candidatos. | No define el patrón de huecos. |
+| `MAX_TRIALS` | Límite de combinaciones por búsqueda/producto; si se supera, se rechaza el grid. | No reduce aleatoriamente precios ni recorta el examen. |
+| `EEX_OFFSET_DAYS` | Disponibilidad EEX simulada; `None` conserva el TOML. | No cambia la fecha de entrega del objetivo ni es una dimensión del grid. |
+
+El tuning exige `warmup_days=0`, que significa **usar todo el pasado original suministrado**,
+no «no usar pasado». Los parámetros de caducidad, olvido y elegibilidad siguen limitando qué
+evidencia resulta utilizable. El backtest de una sola configuración sí admite el calentamiento
+limitado configurado; puede entonces diferir de una ejecución con más historia.
+
+Las predicciones son cronológicas. El precio ocultado de hoy no se incorpora al aprendizaje
+antes de predecirlo. Con offset 0 el motor actualiza después de las predicciones del día; con
+offset negativo libera las parejas históricas cuando su fecha ya es admisible. Los originales
+de días anteriores de validación pueden alimentar días posteriores, sin cambiar los parámetros
+elegidos. Así se simula que seguimos recibiendo datos, no que esos precios permanezcan
+ausentes durante toda la validación. El apartado 3.9 detalla la disponibilidad EEX.
+
+<a id="backtest-metrics"></a>
+
+### 3.6. Qué mide, con un ejemplo calculado
+
+Para evaluar el comportamiento completo usa **`pipeline_configured`**. Los métodos `local_*`,
+`hist_*`, `blend_*` y otros del fichero LOO son diagnósticos: no todos reproducen las mismas
+capas, guardas, fallback o ajuste de forma de producción. Un método diagnóstico puede tener
+predicciones en casos diferentes de otro; comparar sus medias sin revisar los casos puede
+confundir facilidad del examen con calidad.
+
+Supongamos tres casos de una misma curva, todos predichos, con precios en EUR/MWh:
+
+| Caso | Propio ocultado | Predicción | EEX de referencia | Error modelo: predicción − propio | Error absoluto modelo |
+|---|---:|---:|---:|---:|---:|
+| 1 | 100 | 103 | 110 | +3 | 3 |
+| 2 | 120 | 116 | 110 | −4 | 4 |
+| 3 | 80 | 85 | 90 | +5 | 5 |
+
+- **MAE**: media del error absoluto: `(3 + 4 + 5) / 3 = 4 EUR/MWh`. Describe cuánto se
+  equivoca de media sin permitir que los errores positivos y negativos se cancelen.
+- **RMSE**: raíz de la media de errores al cuadrado:
+  `sqrt((3² + (−4)² + 5²) / 3) = 4.08248 EUR/MWh`. Da más importancia a errores grandes.
+- **Sesgo (`bias`)**: media del error con signo: `(3 − 4 + 5) / 3 = +1.33333 EUR/MWh`.
+  Positivo significa que estima por encima en promedio. Un sesgo de cero puede esconder
+  errores grandes opuestos: +20 y −20 se cancelan en sesgo, pero tienen MAE 20.
+- **MAE EEX**: `(10 + 10 + 10) / 3 = 10 EUR/MWh`. También se compara contra el propio.
+- **Score en este ejemplo de una curva**: `4 / 10 = 0.4`. El error medio absoluto es el 40 %
+  del de EEX, una reducción del 60 %. No significa «40 % de aciertos».
+- **`normalized_skill`**: `1 − score = 0.6`. Es otra forma de expresar la misma comparación;
+  no es una métrica independiente ni una probabilidad.
+
+Cada caso pesa igual en estas medias. El volumen puede influir en la estimación y en la
+consolidación de observaciones equivalentes, pero **no pondera el MAE del examen**. El ranking
+usa el score tras aplicar el filtro de cobertura; RMSE y sesgo son diagnósticos, no criterios
+adicionales de desempate.
+
+**Cobertura** responde a otra pregunta: «¿en cuántos casos consiguió dar un precio?». Si hay
+100 propios elegibles con EEX y el modelo predice 90, la cobertura es `90 / 100 = 90 %`.
+Los diez sin predicción no reciben error cero ni una penalización monetaria inventada. Se
+registran como no cubiertos y la selección trata esa cobertura por separado.
+
+En los informes de tuning/MLflow:
+
+| Columna | Significado |
+|---|---|
+| `n_baseline` | Número de casos elegibles con propio ocultado y benchmark EEX. Es el denominador de cobertura. |
+| `n_available` | Casos en los que el pipeline produce una predicción finita. |
+| `n_missing` | `n_baseline − n_available`. |
+| `coverage` | `n_available / n_baseline`; 0.9 equivale al 90 %. |
+| `n_paired` | Casos usados para calcular errores: en calibración, los predichos por todos los candidatos; en validación, los predichos por el ganador. |
+| `n_paired_dates` | Fechas distintas representadas en esos casos de error. |
+| `n_curves` | Identidades representadas en esos casos; no número de tenors. |
+| `mae_model`, `rmse_model`, `bias_model` | Errores del pipeline sobre esos casos, en las filas por unidad. |
+| `mae_eex`, `rmse_eex`, `bias_eex` | Mismas medidas para EEX y contra los mismos propios. |
+
+El informe global `overall` deja vacías las métricas absolutas y utiliza el score sin unidad.
+Las filas `unit` muestran los errores en su propia unidad; no se mezcla un MAE EUR/MWh con
+otro GBP/MWh como si fueran lo mismo. Si el ganador no predice ningún caso de validación,
+la cobertura es cero y los errores/score no son evaluables, no cero.
+
+El comando `backtest` guarda `backtest_loo.csv` y `backtest_report.csv`; el esquema de ese
+resumen diagnóstico es distinto del informe de tuning. Una observación puede producir varias
+filas LOO, una por método: contar todas esas filas no equivale a contar precios ocultados.
+La cobertura del examen tampoco es la cobertura de todos los huecos reales ni la «cobertura
+de filas» que muestra el visor de curvas completas.
+
+<a id="backtest-selection"></a>
+
+### 3.7. Cómo elige una configuración ganadora, exactamente
+
+La elección implementada sigue este orden:
+
+1. Ejecuta todos los candidatos sobre las fechas de calibración y comprueba que comparten
+   los mismos casos base, propios ocultados, benchmark EEX y política de disponibilidad.
+2. Cuenta sus predicciones finitas. Solo pueden ganar los que alcanzan la **máxima cobertura**.
+3. Para comparar errores usa los casos que **todos los candidatos** predijeron, incluidos
+   los candidatos que no pueden ganar por tener menor cobertura. Esa intersección debe
+   contener casos de al menos dos fechas.
+4. Para cada identidad calcula `MAE_modelo / MAE_EEX` en esos casos comunes.
+5. Promedia los cocientes dando el mismo peso a cada identidad. Entre los candidatos con
+   máxima cobertura gana el menor score. Un empate exacto conserva el primero del grid.
+6. Evalúa únicamente al ganador sobre las fechas posteriores reservadas. Esos errores
+   no participan en la selección ni ajustan automáticamente sus parámetros.
+
+Por tanto, es **una prioridad por cobertura y después por error relativo**, no una suma
+ponderada de todas las cualidades posibles de una curva.
+
+**Ejemplo de dos productos.** Supón dos curvas EUR/MWh con igual número de casos:
+
+| Curva | MAE EEX | MAE modelo | Cociente |
+|---|---:|---:|---:|
+| A | 10 | 6 | 0.6 |
+| B | 1 | 1 | 1.0 |
+
+El score global es `(0.6 + 1.0) / 2 = 0.8`, y `normalized_skill=0.2`. Sin embargo, el MAE
+absoluto conjunto baja de `(10 + 1) / 2 = 5.5` a `(6 + 1) / 2 = 3.5`, una reducción del
+36.36 %, no del 20 %. El score resume mejoras relativas por curva, no una reducción universal
+del error monetario. Una curva con pocos casos pesa igual que otra con muchos; dentro de
+cada curva pesan igual los casos, sin equilibrar familias de tenor ni fechas.
+
+**Ejemplo de prioridad de cobertura.** A predice 99 de 100 casos con MAE 1; B predice los
+100 con MAE 1000 en los casos comunes. B puede ganar por cobertura aunque su error sea enorme.
+Así funciona el criterio actual: no existe un umbral que diga «ese relleno adicional no
+compensa». Su conveniencia depende del coste real de abstenerse frente al de dar un mal precio.
+
+**Ejemplo de un efecto de la intersección.** En una misma curva, tres casos de fechas distintas
+tienen todos error absoluto EEX 10. Estos son los errores absolutos de tres candidatos:
+
+| Candidato | Caso 1 | Caso 2 | Caso 3 | Cobertura |
+|---|---:|---:|---:|---:|
+| A | 0 | 100 | 0 | 3/3 |
+| B | 10 | 0 | 0 | 3/3 |
+| C | 0 | Sin predicción | 0 | 2/3 |
+
+Si solo participan A y B, el MAE común es 33.3333 para A y 3.3333 para B: gana B.
+Al añadir C, el caso 2 desaparece de la intersección y solo se puntúan 1 y 3. A tiene MAE 0
+y B MAE 5: ahora gana A. C no puede ganar por su menor cobertura, pero **su participación
+cambia qué errores deciden el ganador**. Los errores de predicciones fuera de la intersección
+no entran en el score de selección aunque esas predicciones cuenten para cobertura. Es una
+limitación del criterio actual que hay que tener presente al ampliar un grid.
+
+**EEX perfecto o casi perfecto.** Si `MAE_EEX=0`, el cociente se define como 1 cuando el
+modelo también acierta todo, e infinito si comete algún error. Si el error EEX es muy pequeño,
+el cociente puede crecer mucho: `0.1 / 0.001 = 100` aunque el error absoluto del modelo sea
+0.1. Por eso deben leerse también MAE, tamaños de muestra y cobertura, no solo el score.
+Las métricas no finitas no se convierten en ceros; el registro MLflow conserva su estado en
+los artefactos aunque no aparezcan como una métrica numérica ordinaria.
+
+EEX se usa aquí como **benchmark de comparación**, incluso si la regla de producción impide
+copiar el settlement como respaldo. Esta comparación no permite concluir que el pipeline
+supera al fallback EEX suavizado: ese candidato tendría que evaluarse expresamente.
+
+### 3.8. Curvas completas y predicciones ocultadas responden preguntas distintas
 
 El [notebook MLflow](MLFLOW.es.md) permite ver curvas completas guardadas para cada candidato
 en calibración y para el ganador en validación. Conservan los propios disponibles del día:
@@ -139,7 +409,7 @@ experimentos anteriores, sin recalcular con datos actuales. Si un run antiguo no
 curvas, genera otro experimento para obtenerlas; no se reconstruye el archivo ausente como
 si fuera la salida original de aquella ejecución.
 
-### Disponibilidad EEX: escenario fijo de evaluación
+### 3.9. Disponibilidad EEX: escenario fijo de evaluación
 
 `eex.offset_days=0` permite publicaciones hasta la referencia T; `-1` solo hasta T-1 día
 natural o anteriores. Elígelo en el TOML, utiliza `--eex-offset-days -1` en `backtest`/`tune`
@@ -155,7 +425,7 @@ del mismo día, por lo que no aporta ajuste cross actual con offset negativo, in
 de correlación local también siguen siendo utilizables.
 
 En lunes con offset -1, el corte es domingo. La publicación del viernes tiene tres días de
-antigüedad respecto al lunes: `max_stale_days=2` la rechaza y cero sigue siendo sin límite.
+antigüedad respecto al lunes: `max_stale_days=2` la rechaza y cero en el TOML significa sin límite.
 Revisa `eex_offset_days`, `eex_cutoff_date`, `eex_asof` en LOO/predicciones emparejadas y la
 política de disponibilidad en los metadatos de tuning.
 
@@ -165,16 +435,49 @@ referencia EEX y posiblemente los propios evaluables. Informa cobertura y claves
 empareja expresamente los casos antes de atribuir diferencias a precisión. Las fechas del
 CSV son una convención diaria, no un registro de disponibilidad intradía o revisiones históricas.
 
+<a id="backtest-limits"></a>
+
+### 3.10. Qué demuestra esta prueba y qué falta para evaluar otros tipos de huecos
+
+| Pregunta | Qué permite afirmar la implementación actual |
+|---|---|
+| ¿Reconstruye bien un propio cuando retiro ese periodo y conservo las demás pistas? | Se mide en los casos elegibles de las fechas elegidas. |
+| ¿Cuál de estas combinaciones gana? | Una gana bajo la prioridad cobertura/score y el conjunto común descritos; no es necesariamente la mejor fuera de ese examen. |
+| ¿Cada producto tiene su propio ganador? | En búsqueda global hay uno común; en búsqueda individual hay uno por identidad y una comprobación conjunta posterior. |
+| ¿Funciona cuando faltan tres meses juntos o no hay propios durante una semana? | Este enmascarado no lo reproduce directamente. |
+| ¿Funciona para objetivos sin EEX construible? | Esos casos no entran en el examen LOO actual. |
+| ¿Evalúa solo los tenors que me interesan producir? | No necesariamente: también examina otros propios elegibles del input. |
+| ¿Premia que meses y trimestres cuadren, o que no haya saltos extraños? | No como términos directos del ranking. Shape puede cambiar las predicciones, pero se puntúan sus errores, no su apariencia. |
+| ¿Demuestra que los parámetros funcionarán en todos los mercados y estaciones? | No. Hay un único corte temporal por ejecución y no se informa incertidumbre del ganador. |
+| ¿Los tests y la demo sintética prueban precisión sobre mis datos reales? | Verifican comportamiento y escenarios controlados; no acreditan esa precisión real. |
+
+Ocultar conocidos sigue siendo útil: proporciona respuestas contra las que medir. La limitación
+está en **qué situaciones representa el examen**. Si la producción tiene muchos huecos amplios
+o persistentes, hacen falta pruebas de esos patrones, manteniendo los valores ocultos también
+durante el aprendizaje histórico. No basta con aumentar el número de combinaciones del grid.
+
+Una validación posterior ayuda a comprobar si la elección se sostiene fuera de las fechas que
+la eligieron. Si se consulta repetidamente ese resultado para cambiar el grid, deja de ser una
+comprobación independiente de todas esas decisiones humanas. El apartado 5 describe ampliaciones
+propuestas: varios cortes temporales, bloques ausentes, evaluación por familias y horizontes,
+errores extremos y coherencia. **Son propuestas, no argumentos disponibles actualmente.**
+
+Para auditar esta explicación en el código: [preparación y ocultación](src/vwaps/fill.py),
+[selección y métricas](src/vwaps/tuning.py), [informes del backtest](src/vwaps/cli.py) y
+[registro de experimentos](src/vwaps/experiments.py). Ampliar esta guía no cambia el algoritmo.
+
 ## 4. Qué parámetros se pueden comparar
 
 La rejilla del comando CLI admite seis campos:
 `basis_mode`, `tau_log`, `shrink_k`, `layer_hist`, `layer_correlation`, `layer_cross`.
 Por defecto solo varía los tres modos de basis; las otras dimensiones requieren listas explícitas.
 
-El [notebook de experimentos](MLFLOW.es.md) añade campos de memoria, fallback y shape a su
-grid; esa guía enumera sus nombres Python exactos. Las indicaciones «fijo en tune» de la tabla
-siguiente se refieren al CLI. Los filtros que cambian las observaciones evaluadas siguen
-excluidos de ambos grids.
+El [notebook de experimentos](MLFLOW.es.md) admite los 33 controles escalares, incluidos
+memoria, fallback, shape, filtros de anclas y guardas ratio; esa guía enumera los nombres
+Python exactos. Su población de examen se fija independientemente de los filtros candidatos,
+como explica el apartado 3.4. Las indicaciones «fijo en tune» o «solo entra en la rejilla»
+de la tabla siguiente se refieren exclusivamente al CLI de seis campos. Targets,
+convenciones, disponibilidad y otras opciones operativas siguen fuera de ambas mallas.
 
 | Familia | Controles actuales | Qué permiten estudiar |
 |---|---|---|

@@ -18,7 +18,7 @@ which cover only some contracts, and **EEX settlements**, which provide much of 
 
 ## What to configure and what to leave at its initial value
 
-The 59 entries in `config.toml` are not 59 parameters you must optimize: 19 are paths,
+The 60 entries in `config.toml` are not 60 parameters you must optimize: 19 are paths,
 column names and time zones. For a first run, review paths, identity mappings and target
 tenors, and keep the `auto` calculation mode. The `correlation`, `cross` and `arbitrage` layers stay
 disabled. Advanced controls are documented so changes are deliberate and auditable,
@@ -29,6 +29,9 @@ options. All other TOML settings remain fixed.
 **Fallback change:** without usable own adjustments, EEX is smoothed over complete publication windows; it is never copied directly as the fallback. Section 16 explains averages, monthly cascading, controls and audit.
 
 **Shape layer:** section 17 and [SHAPE.md](SHAPE.md) document the implemented optional stage after refill. The cases and formulas below describe the pre-shape calculation (also the final result with default `shape.mode="off"`). Raw input is always retained; final original prices may move only with explicit `shape.adjust_originals=true`. Active shape adds its own trace and before-values.
+
+
+**Global or individual configuration is implemented:** `[run].configuration_mode` selects `global` (default, ignores individual cells) or `individual` (applies each curve's nonempty CSV/Excel mapping cells). All 33 scalar model controls and the `tenors` list can be overridden; these are not closed presets. [CONFIGURATION.md](CONFIGURATION.md) documents the 34 columns, inheritance, CLI precedence, daily/refill/catchup behavior and provenance. Global or per-product MLflow search is a separate choice: Excel stores fixed values, while the notebook/JSON stores candidate grids.
 
 ## 0. Understand the product before reading the formulas
 
@@ -1314,7 +1317,7 @@ summary or `status`.
 
 ## 6. Parameters (`config.toml`)
 
-Summary of the main controls. **Section 14 details all 59 config.toml keys**, including
+Summary of the main controls. **Section 14 details all 60 config.toml keys**, including
 aliases, time zones, sensitivity, conditions of use and constraints.
 
 **Layers** (`[layers]`) control execution without code changes:
@@ -1634,8 +1637,8 @@ the simulated co-movements: **use a backtest on real data to decide whether to e
 ## 11. Daily use, pending recovery and historical refill
 
 All three uses share the same configuration, whose default input is `data/vwaps.xlsx`. To test a
-separately generated synthetic history, select it explicitly; synthetic files are not included
-in the portable package:
+separately generated synthetic history, select it explicitly; generated synthetic files are
+not published with the source repository:
 
 ```powershell
 .\.venv\Scripts\python.exe run.py refill --from 2026-08-10 --to 2026-09-30 --vwap data/synthetic_vwaps.csv
@@ -1813,9 +1816,11 @@ when all three monthly EEX references are equal.
 The real input lives on another machine. It does not need to be copied to the development
 machine: move the program and documentation to where the data already resides.
 
-The `dist/vwaps-portable.zip` package contains code, declared dependencies, configuration and
-documentation. It excludes `.venv`, synthetic data, generated outputs and the demonstration
-mapping. Its initial `config.toml` uses these relative paths:
+Clone [the source repository](https://github.com/dieguisgs/test1_v) on that machine, or copy
+its source files and documentation into a working directory. The repository contains code,
+declared dependencies, configuration, notebooks and bilingual guides. Real inputs, local EEX
+files, the local mapping, `.venv` and generated outputs are not published; the fictional
+mapping example is disabled. Its initial `config.toml` uses these relative paths:
 
 ```toml
 [paths]
@@ -1831,7 +1836,7 @@ convenient in Windows TOML paths, for example `C:/data/vwaps.xlsx`.
 
 ### 13.1. Installation
 
-1. Extract the package into a working directory on the destination machine.
+1. Clone the repository or copy the source into a working directory on the destination machine.
 2. Ensure **Python 3.11 or later** is installed.
 3. Install dependencies from that directory using either approach:
 
@@ -1847,6 +1852,10 @@ python -m venv .venv
 `uv sync` uses the project's dependency declarations and lockfile. The pip alternative
 installs dependencies for CSV and XLSX inputs but does not pin the same versions. Do not
 copy the development machine's `.venv` directory.
+
+For both notebooks and the local MLflow service, use `uv sync --group notebook --group experiment`
+and select the resulting environment as the notebook kernel. Notebook text, code and widgets
+are in English; standalone Markdown guides are available in English and Spanish.
 
 ### 13.2. Configuration and first execution
 
@@ -1889,7 +1898,7 @@ does not supply earlier memory. Do not use `enriched_history.csv` as new input.
 Review `output/enriched/<date>.csv`, `output/enriched_history.csv` and the log. `data_origin`
 and `estimation_method` distinguish observations from estimates. Exit code 1 requires checking
 the log; if the engine recorded errors, existing results have not been replaced by a partial
-run. Preserve the package version, configuration, mapping and source files used for a
+run. Preserve the source commit/version, configuration, mapping and input files used for a
 reproducible review.
 
 
@@ -1902,7 +1911,7 @@ or enrich the complete input. See section 5.
 
 ## 14. Complete configuration reference: what controls each decision
 
-This chapter is a complete reference to the **59 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
+This chapter is a complete reference to the **60 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
 
 The tables distinguish a parameter's effect from the conditions under which it matters. The loader and engine validate types, finite numbers and required bounds. Quoted booleans and a single string in place of the tenor list are rejected. Recommended calibration ranges remain guidance; validity does not imply predictive quality.
 
@@ -2008,6 +2017,7 @@ Cross coefficients map a helper's surprise to the target's basis scale; they do 
 
 | Key | Default | Increasing / decreasing | When it applies / constraints |
 |---|---|---|---|
+| `run.configuration_mode` | `"global"` | `global` ignores per-curve model cells; `individual` applies nonempty cells over TOML defaults. | Shared resolver for daily, refill, catchup and backtest; all effective model fields are recorded. See [CONFIGURATION.md](CONFIGURATION.md). |
 | `run.warmup_days` | `0` | Zero replays all supplied earlier original history. Among positive values, larger retains more prior context and takes more work; smaller trades historical context for shorter warmup. | Loader requires a nonnegative integer. A positive limit can make a short daily run differ from a long refill. It does not fetch absent inputs: supply accumulated originals and EEX history. |
 
 ### Input schema assignments
@@ -2035,7 +2045,7 @@ is an error and prevents result writes. See [the code review](CODE_REVIEW.md) fo
 
 ### Optional post-refill shape controls
 
-All seven implemented controls are listed here to complete the 59-key inventory. Section 17 explains the objective, examples and output semantics. These numeric defaults are uncalibrated starter values.
+All seven implemented controls are listed here to complete the 60-key inventory. Section 17 explains the objective, examples and output semantics. These numeric defaults are uncalibrated starter values.
 
 | Key | Default | Meaning and effect |
 |---|---|---|
@@ -2263,7 +2273,7 @@ anchor_months = 2
 These controls do not change originals or prices with local/historical/cross adjustments.
 Price and spread windows are independent: neither must be larger than the other.
 Maximum staleness governs the latest accepted snapshot; it does not turn the windows into
-calendar-day windows. The 59 configuration keys include these five controls.
+calendar-day windows. The 60 configuration keys include these five controls.
 
 Override them for one `daily`, `refill`, `catchup`, `backtest` or `tune` execution:
 
@@ -2550,9 +2560,10 @@ with a different permitted configuration. Historical basis/correlation updates r
 existing chronological algorithm, not a new MLflow learning stage.
 
 The command-line `tune` interface described in section 15 retains its **six** grid controls.
-The experiment API/notebook accepts **29** model controls: those six plus local/arbitrage
-switches, other-kind weight, own-history memory and eligibility threshold, correlation/cross
-memory and evidence controls, the five EEX fallback controls and seven shape controls.
+The experiment API/notebook accepts all **33 scalar model controls**: those six plus
+local/arbitrage switches, other-kind weight, own-history memory and eligibility threshold,
+correlation/cross memory and evidence controls, five EEX fallback controls, seven shape
+controls, and `min_volume`, `max_anchor_dev`, `ratio_eex_floor`, `max_ratio_deviation`.
 The guide lists their exact flat Python names, types and limits. For example:
 
 ```python
@@ -2563,12 +2574,22 @@ PARAMETER_GRID = {
 ```
 
 This creates **3 × 2 = 6** candidates. Lists form a Cartesian product, bounded by
-`MAX_TRIALS` (24 in the notebook). Omitted fields stay fixed. Paths, mapping/identity, targets,
-conventions, volume/outlier filters, ratio guards, EEX availability offsets/staleness and evaluation dates are
-excluded from the grid so candidates retain a common observation universe. Grid support
-does not mean every parameter is worth optimizing or has an effect in every case.
+`MAX_TRIALS` (24 per search in the notebook). Omitted fields stay fixed. Paths,
+mapping/identity, targets, conventions, EEX availability offsets/staleness, warmup and
+evaluation dates remain outside the grid. Grid support does not mean every parameter is
+worth optimizing or has an effect in every case.
 
-The evaluation contract is unchanged: hide one physical own period and all its aliases;
+The MLflow campaign fixes the EEX-evaluable hidden-truth population independently of
+candidate filters: `min_volume` and `max_anchor_dev` are disabled when choosing scoring
+cases. Their candidate values still filter visible anchors and historical training.
+Ratio guards also remain active in each estimator without deleting inconvenient truths
+from the exam. Raising a volume threshold therefore cannot improve the result merely by
+discarding low-volume answers. Model abstentions still affect coverage and the common
+prediction intersection. A configured `backtest` and the six-control CLI `tune` retain
+their fixed configured eligibility filters; a direct expanded API grid freezes scoring
+eligibility when it varies those filters or the ratio floor. See [BACKTEST.md](BACKTEST.md).
+
+Masking and ranking retain their rules: hide one physical own period and all its aliases;
 maximize calibration coverage first; then minimize the equal-curve mean of
 `MAE_model / MAE_EEX` on predictions common to **all** calibration candidates. The truth is
 the hidden own VWAP, not EEX. Absolute errors remain separated by unit. Recent eligible dates
@@ -2576,8 +2597,15 @@ are held out, and **only the calibration winner** is evaluated there with fixed 
 Earlier observed originals can still update the history used for later dates. The notebook
 example reserves five dates; the CLI default remains twenty.
 
-Tracking creates one parent run and candidate children, with configuration, grid, date split,
-data fingerprints, code provenance and reports. Optional individual predictions **and full
+`SEARCH_SCOPE="global"` searches a common configuration, ignoring spreadsheet model
+overrides. `SEARCH_SCOPE="individual"` searches each selected exact identity from its
+effective production base, using a common grid or a replacement product grid. Individual
+winners are also checked together with frozen parameters on the same reserved dates;
+this checks their combined behavior, not a second independent test. See [CONFIGURATION.md](CONFIGURATION.md).
+
+Tracking creates one parent run per search and its candidate children, linked by a campaign
+ID, with configuration, grid, date split, data fingerprints, code provenance and reports.
+Optional individual predictions **and full
 curve snapshots** are omitted with `LOG_PREDICTIONS=False`; aggregates and audit metadata remain. The local
 service listens on `127.0.0.1`. The selected configuration is a proposal: no automatic config
 change or publication of production curves occurs. MLflow is optional; ordinary filling and
@@ -2668,7 +2696,7 @@ that cross-market information ceases to exist.
 `daily`, `refill`, `catchup`, `backtest` and `tune` accept `--eex-offset-days 0` or `-1`
 (and other nonpositive integers). The notebook's `EEX_OFFSET_DAYS=None` uses the selected
 config; an integer overrides the dataset copy without rewriting the TOML. Availability is
-fixed within a grid. It is excluded from both the six-field CLI grid and the 29-field
+fixed within a grid. It is excluded from both the six-field CLI grid and the 33-field
 experiment grid; compare different offsets in separate, clearly labeled experiments.
 Use the same intended evaluation dates and inspect the actual paired sample and coverage:
 the stricter policy can remove EEX-evaluable observations, so raw scores need not be comparable.

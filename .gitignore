@@ -2,7 +2,8 @@
 /data/
 /IMGS/
 /imgs/
-/mappings/
+/mappings/*
+!/mappings/products.individual.example.csv
 /output/
 /output_*/
 /dist/

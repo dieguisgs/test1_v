@@ -131,6 +131,11 @@ halflife_days = 20     # Calendar-day decay for correlation and beta between obs
 
 
 [run]
+# global: ignore optional model-parameter columns in the product mapping.
+# individual: apply each row's model settings; blank cells inherit this TOML.
+# Add all supported columns with: python run.py mapping --with-parameters
+# Mapping files can be CSV or XLSX (first sheet), with one row per full identity.
+configuration_mode = "global"
 # 0 = all available original history: daily and refill use the same memory.
 # N > 0 limits warmup and may differ from a longer refill.
 # daily needs accumulated input or a glob that includes previous originals.

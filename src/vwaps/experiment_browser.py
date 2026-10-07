@@ -170,7 +170,9 @@ def create_experiment_browser(
                 return
             options = [
                 (f"{row['start_time']} | {row['run_name']} | {row['status']} | "
-                 f"{row['data_label']} | EEX offset={row['eex_offset_days']} | {row['run_id'][:8]}", row["run_id"])
+                 f"{row['data_label']} | EEX offset={row['eex_offset_days']} | "
+                 f"{('Campaign ' + row.get('campaign_state', '') + ' | ') if row.get('campaign_id') else ''}"
+                 f"{row['run_id'][:8]}", row["run_id"])
                 for row in rows.to_dict("records")
             ]
             parent.options = options

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from vwaps.tenors import parse_tenor
@@ -63,6 +63,8 @@ class Config:
     shape_original_weight: float = 10.0
     shape_coherence_tolerance: float = 0.01
     eex_offset_days: int = 0
+    configuration_mode: str = "global"
+    command_overrides: dict = field(default_factory=dict)
 
     def tz(self, area: str) -> str:
         return self.timezones.get(area, self.timezones.get("default", "Europe/Berlin"))
@@ -108,10 +110,14 @@ def validate_shape_config(cfg: Config) -> None:
 
 def validate_config(cfg: Config) -> None:
     """Validate user-controlled types and finite bounds before calculations."""
+    # Import lazily because product_config also resolves and validates Config.
+    from vwaps.product_config import validate_parameter_overrides
+    validate_parameter_overrides(cfg.command_overrides)
     for name in ("local", "correlation", "cross", "arbitrage"):
         if not isinstance(getattr(cfg, f"layer_{name}"), bool):
             raise ValueError(f"layers.{name} must be a boolean, not a quoted string or number")
     for name, value, choices in (
+        ("run.configuration_mode", cfg.configuration_mode, ("global", "individual")),
         ("method.basis_mode", cfg.basis_mode, ("auto", "additive", "ratio")),
         ("conventions.day", cfg.day_convention, ("calendar", "business")),
         ("layers.hist", cfg.layer_hist, ("on", "off", "auto")),
@@ -222,6 +228,7 @@ def load_config(path: str | Path) -> Config:
         cross_min_obs=cross.get("min_obs", 8),
         cross_halflife_days=cross.get("halflife_days", 20),
         warmup_days=raw.get("run", {}).get("warmup_days", 0),
+        configuration_mode=raw.get("run", {}).get("configuration_mode", "global"),
         vwap_columns=dict(raw.get("vwap_columns", {})),
         ratio_eex_floor=method.get("ratio_eex_floor", 1.0),
         max_ratio_deviation=method.get("max_ratio_deviation", 1.0),

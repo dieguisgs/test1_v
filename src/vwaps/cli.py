@@ -22,7 +22,10 @@ from vwaps.io_vwap import load_input
 from vwaps.identity import CurveKey, IDENTITY_COLUMNS, curve_keys, normalize_identity
 from vwaps.log import get_logger, setup_logging
 from vwaps.mapping import (COLUMNS, ProductMap, check_mapping, eex_path, guess_row,
-                           load_mapping, migrate_legacy_mapping)
+                           load_mapping, migrate_legacy_mapping, read_mapping_table)
+from vwaps.product_config import (
+    MODEL_PARAMETER_FIELDS, configuration_context_records, configuration_record, effective_config,
+)
 from vwaps.publication import CsvBatch, publication_lock
 from vwaps.synthetic import make_synthetic
 from vwaps.tenors import parse_tenor, resolve_tenor
@@ -39,6 +42,10 @@ def main(argv: list[str], config_path: Path) -> int:
 
     p = sub.add_parser("mapping", help="create/update and validate the configured product mapping")
     p.add_argument("--vwap", default=None, help="VWAP file(s); override config.toml")
+    p.add_argument("--with-parameters", action="store_true",
+                   help="add editable model-parameter columns; blank cells inherit global values")
+    p.add_argument("--export", type=Path, default=None,
+                   help="export the mapping to a new CSV/XLSX path, without changing paths.mapping")
 
     p = sub.add_parser("daily", help="fill one reference date (default: today)")
     p.add_argument("--date", type=date.fromisoformat, default=None)
@@ -90,6 +97,11 @@ def main(argv: list[str], config_path: Path) -> int:
                    help="how to generate the VWAP-EEX difference (controls synthetic model bias)")
     p.add_argument("--out", default="data")
 
+    for command in ("mapping", "daily", "refill", "catchup", "backtest"):
+        sub.choices[command].add_argument(
+            "--configuration-mode", choices=("global", "individual"), default=None,
+            help="global ignores table model settings; individual applies each curve's parameter cells")
+
     for command in ("daily", "refill", "catchup", "backtest", "tune"):
         parser = sub.choices[command]
         parser.add_argument("--eex-offset-days", type=int, default=None,
@@ -131,11 +143,12 @@ def main(argv: list[str], config_path: Path) -> int:
             "fallback_spread_window", "fallback_anchor_months",
             "shape_mode", "shape_adjust_originals", "shape_smoothness_weight",
             "shape_coherence_weight", "shape_max_abs_adjustment", "shape_original_weight",
-            "shape_coherence_tolerance", "eex_offset_days",
+            "shape_coherence_tolerance", "eex_offset_days", "configuration_mode",
         ) if getattr(a, name, None) is not None}
         if "shape_adjust_originals" in overrides:
             overrides["shape_adjust_originals"] = overrides["shape_adjust_originals"] == "on"
-        cfg = replace(cfg, **overrides)
+        cfg = replace(cfg, **overrides, command_overrides={
+            name: value for name, value in overrides.items() if name in MODEL_PARAMETER_FIELDS})
         validate_config(cfg)
         return {
             "mapping": cmd_mapping, "daily": cmd_daily, "refill": cmd_refill,
@@ -258,6 +271,16 @@ def _write(cfg: Config, res, enriched: pd.DataFrame) -> None:
 def _stage_outputs(cfg: Config, res, enriched: pd.DataFrame, batch: CsvBatch) -> None:
     """Read and merge every affected output while holding the writer lock."""
     out = cfg.output_dir
+    for context_id, document in getattr(res, "configuration_contexts", {}).items():
+        if len(context_id) != 64 or any(character not in "0123456789abcdef" for character in context_id):
+            raise ValueError("Invalid configuration context identifier; no results written")
+        destination = out / "configurations" / f"{context_id}.json"
+        content = json.dumps(document, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        if destination.exists():
+            if json.loads(destination.read_text(encoding="utf-8")) != document:
+                raise ValueError(f"Configuration context snapshot conflicts with its identifier: {destination}")
+        else:
+            batch.stage_text(destination, content)
     for name in ("filled_history.csv", "consistency_history.csv"):
         _validate_output_schema(out / name, KEYS)
     _validate_output_schema(out / "enriched_history.csv", ENRICHED_KEYS)
@@ -312,7 +335,8 @@ def _print_summary(filled: pd.DataFrame) -> None:
 def _layers(cfg: Config) -> str:
     on = [n for n, v in [("local", cfg.layer_local), ("correlation", cfg.layer_correlation),
                          ("cross", cfg.layer_cross), ("arbitrage", cfg.layer_arbitrage)] if v]
-    return (f"Layers: {', '.join(on)} | hist={cfg.layer_hist} | mode={cfg.basis_mode} "
+    return (f"Configuration: {cfg.configuration_mode}; global defaults: "
+            f"layers={', '.join(on)} | hist={cfg.layer_hist} | mode={cfg.basis_mode} "
             f"| shape={cfg.shape_mode} | shape_adjust_originals={cfg.shape_adjust_originals} "
             f"| eex_offset_days={cfg.eex_offset_days}")
 
@@ -326,7 +350,7 @@ def cmd_mapping(cfg: Config, a) -> int:
     path = cfg.mapping_file
     migrated = False
     if path.exists():
-        cur = pd.read_csv(path, dtype=str, encoding="utf-8-sig", keep_default_na=False)
+        cur = read_mapping_table(path)
         migrated = any(name not in cur for name in IDENTITY_COLUMNS)
         cur = migrate_legacy_mapping(cur, identities)
     else:
@@ -337,12 +361,35 @@ def cmd_mapping(cfg: Config, a) -> int:
     if new:
         cur = pd.concat([cur, pd.DataFrame([
             guess_row(p, cfg, region=r, unit=u) for p, r, u in new])], ignore_index=True)
-    if new or migrated:
+    parameter_columns_added = False
+    if getattr(a, "with_parameters", False):
+        for name in MODEL_PARAMETER_FIELDS:
+            if name not in cur:
+                cur[name] = ""
+                parameter_columns_added = True
+    export = getattr(a, "export", None)
+    if export is not None:
+        export = cfg.resolve(export).resolve()
+        if export.exists():
+            raise ValueError(f"Mapping export already exists: {export}; choose a new filename")
+        if export.suffix.lower() not in (".csv", ".xlsx"):
+            raise ValueError("Mapping export must have a .csv or .xlsx extension")
+    if new or migrated or parameter_columns_added or export is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with CsvBatch() as batch:
-            batch.stage(path, cur[COLUMNS])
+            columns = [*COLUMNS, *[name for name in cur if name not in COLUMNS]]
+            destinations = ([path] if new or migrated or parameter_columns_added else [])
+            if export is not None:
+                destinations.append(export)
+            for destination in destinations:
+                if destination.suffix.lower() == ".xlsx":
+                    batch.stage_excel(destination, cur[columns])
+                else:
+                    batch.stage(destination, cur[columns])
         _out(f"{len(new)} new curves added to {path} (draft: review these entries)"
              + ("; legacy mapping migrated to product/region/unit" if migrated else ""))
+        if export is not None:
+            _out(f"Mapping exported to {export}. Set paths.mapping to that file to use it.")
     else:
         _out(f"{path}: no new curves")
     maps = load_mapping(cfg)
@@ -403,7 +450,8 @@ def cmd_daily(cfg: Config, a) -> int:
 
 def _history_point_keys(path: Path, enriched: bool = False, *,
                         eex_offset_days: int | None = None,
-                        required_points: set[tuple] | None = None) -> set[tuple]:
+                        required_points: set[tuple] | None = None,
+                        configurations: dict[CurveKey, dict] | None = None) -> set[tuple]:
     """Read processed keys and reject reuse with another EEX availability policy.
 
     Presence includes missing prices. Legacy rows without a policy column or
@@ -417,8 +465,12 @@ def _history_point_keys(path: Path, enriched: bool = False, *,
     columns = [f"{prefix}{name}" for name in [*KEYS, "tenor"]]
     _validate_output_schema(path, columns)
     policy_column = f"{prefix}eex_offset_days"
+    configuration_column = f"{prefix}configuration_id"
+    parameters_column = f"{prefix}configuration_parameters"
+    context_column = f"{prefix}configuration_context_id"
     header = pd.read_csv(path, encoding="utf-8-sig", nrows=0).columns
-    read_columns = [*columns, *([policy_column] if policy_column in header else [])]
+    read_columns = [*columns, *[name for name in (policy_column, configuration_column, parameters_column, context_column)
+                               if name in header]]
     frame = pd.read_csv(path, encoding="utf-8-sig", dtype=str, keep_default_na=False,
                         usecols=read_columns)
     frame = frame.rename(columns={column: column.removeprefix(prefix) for column in columns}) if prefix else frame
@@ -444,7 +496,60 @@ def _history_point_keys(path: Path, enriched: bool = False, *,
                     f"Run refill for this range with --eex-offset-days {eex_offset_days} "
                     "to recalculate explicitly, or select another paths.output_dir. No result files written."
                 )
+    if configurations is not None:
+        saved_ids = frame[configuration_column] if configuration_column in frame else [""] * len(frame)
+        saved_parameters = frame[parameters_column] if parameters_column in frame else [""] * len(frame)
+        for point, saved_id, parameters in zip(points, saved_ids, saved_parameters):
+            if required_points is not None and point not in required_points:
+                continue
+            expected = configurations.get(tuple(point[1:4]))
+            if expected is None:
+                continue
+            text = str(saved_id).strip()
+            # Legacy global outputs lack a fingerprint. Preserve their established
+            # catchup behavior; an individual run cannot infer their settings.
+            if not text and expected["configuration_mode"] == "global":
+                continue
+            if text != expected["configuration_id"] and _target_expansion_only(
+                    parameters, expected["configuration_parameters"]):
+                continue  # Missing additional targets trigger a full date/curve recalculation below.
+            if text != expected["configuration_id"]:
+                raise ValueError(
+                    f"Catchup cannot reuse {path} row {point}: saved model configuration "
+                    f"{text or '(unrecorded legacy settings)'} differs from the requested configuration. "
+                    "Run refill for this range to recalculate explicitly, or select another "
+                    "paths.output_dir. No result files written.")
+        saved_contexts = frame[context_column] if context_column in frame else [""] * len(frame)
+        for point, saved_context in zip(points, saved_contexts):
+            if required_points is not None and point not in required_points:
+                continue
+            expected = configurations.get(tuple(point[1:4]))
+            if expected is None or "configuration_context_id" not in expected:
+                continue
+            text = str(saved_context).strip()
+            if not text and expected["configuration_mode"] == "global":
+                continue
+            if text != expected["configuration_context_id"]:
+                raise ValueError(
+                    f"Catchup cannot reuse {path} row {point}: its mapping, operational settings "
+                    "or CROSS helper configuration context has changed. Run refill for this range "
+                    "to recalculate explicitly, or select another paths.output_dir. No result files written.")
     return set(points)
+
+
+def _target_expansion_only(previous: str, current: str) -> bool:
+    """Allow catchup's established target-expansion workflow without mixing model settings."""
+    try:
+        old, new = json.loads(previous), json.loads(current)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return False
+        old_targets, new_targets = old.pop("tenors"), new.pop("tenors")
+        if (not isinstance(old_targets, list) or not isinstance(new_targets, list)
+                or any(not isinstance(label, str) for label in [*old_targets, *new_targets])):
+            return False
+        return old == new and set(old_targets) < set(new_targets)
+    except (ValueError, TypeError, KeyError):
+        return False
 
 
 def _reference_days(cfg: Config, raw: pd.DataFrame, maps: list[ProductMap], books: dict,
@@ -485,24 +590,30 @@ def cmd_catchup(cfg: Config, a) -> int:
         raise ValueError("The start date cannot be later than the end date")
 
     days = _reference_days(cfg, raw, maps, books, start, end)
+    settings = {mapping.key: effective_config(cfg, mapping) for mapping in outputs}
+    contexts = configuration_context_records(cfg, maps)
+    configurations = {mapping.key: {
+        **configuration_record(cfg, mapping),
+        "configuration_context_id": contexts[mapping.key]["configuration_context_id"],
+    } for mapping in outputs}
     required_points = {
         (day, *mapping.key, tenor)
-        for day in days for mapping in outputs for tenor in dict.fromkeys(cfg.tenors)
+        for day in days for mapping in outputs for tenor in dict.fromkeys(settings[mapping.key].tenors)
         if resolve_tenor(tenor, day, cfg.day_convention, cfg.weekend_offset) is not None
     }
     completed_filled = _history_point_keys(
         cfg.output_dir / "filled_history.csv", eex_offset_days=cfg.eex_offset_days,
-        required_points=required_points,
+        required_points=required_points, configurations=configurations,
     )
     completed_enriched = _history_point_keys(
         cfg.output_dir / "enriched_history.csv", enriched=True,
-        eex_offset_days=cfg.eex_offset_days, required_points=required_points,
+        eex_offset_days=cfg.eex_offset_days, required_points=required_points, configurations=configurations,
     )
     pending: set[tuple[date, CurveKey]] = set()
     for day in sorted(days):
-        targets = [label for label in dict.fromkeys(cfg.tenors)
-                   if resolve_tenor(label, day, cfg.day_convention, cfg.weekend_offset) is not None]
         for m in outputs:
+            targets = [label for label in dict.fromkeys(settings[m.key].tenors)
+                       if resolve_tenor(label, day, cfg.day_convention, cfg.weekend_offset) is not None]
             if any((day, *m.key, tenor) not in completed_filled
                    or (day, *m.key, tenor) not in completed_enriched for tenor in targets):
                 pending.add((day, m.key))
@@ -618,6 +729,11 @@ def _json_finite(value):
 def cmd_tune(cfg: Config, a) -> int:
     """Write evaluation reports without changing the production configuration."""
     from vwaps.tuning import tune_parameters
+
+    if cfg.configuration_mode != "global":
+        _out("CLI tune searches one global configuration and ignores individual table settings. "
+             "Use the MLflow notebook for per-product searches.")
+    cfg = replace(cfg, configuration_mode="global")
 
     grid = {
         "basis_mode": _grid_values(a.basis_modes, cfg.basis_mode, allowed=("auto", "ratio", "additive")),

@@ -41,6 +41,7 @@ from vwaps.io_eex import EexBook
 from vwaps.log import get_logger
 from vwaps.mapping import ProductMap
 from vwaps.pricer import Pricer
+from vwaps.product_config import configuration_context_records, configuration_record, effective_config
 from vwaps.shape import apply_shape
 from vwaps.tenors import Key, Period, resolve_tenor
 
@@ -129,25 +130,59 @@ class RunResult:
     consistency: pd.DataFrame
     loo: pd.DataFrame = field(default_factory=pd.DataFrame)
     errors: list[dict] = field(default_factory=list)
+    configuration_contexts: dict[str, dict] = field(default_factory=dict)
 
 
 class CurveFiller:
+    """Refill curves using immutable effective settings for each full identity.
+
+    Mapping overrides apply in individual mode. Explicit ``curve_parameters``
+    are final candidate overrides used by tuning, and also apply in global
+    mode. The run calendar and EEX availability policy remain shared.
+    Optional ``evaluation_configs`` freeze LOO truth eligibility independently
+    of candidate anchor filters; they never change production predictions.
+    """
+
     def __init__(self, cfg: Config, vwaps: pd.DataFrame, maps: list[ProductMap],
-                 books: dict[CurveKey | str, EexBook | None]):
+                 books: dict[CurveKey | str, EexBook | None], *,
+                 curve_parameters: dict[CurveKey, dict] | None = None,
+                 evaluation_configs: dict[CurveKey, Config] | None = None):
         validate_config(cfg)
         self.cfg = cfg
         self.vwaps = vwaps
         self.maps = [m for m in maps if m.active]
+        self.curve_parameters = deepcopy(curve_parameters or {})
+        unknown = set(self.curve_parameters) - {m.key for m in self.maps}
+        if unknown:
+            raise ValueError(f"Curve parameters contain unmapped or inactive curve identities: {sorted(unknown)}")
+        self.curve_configs = {
+            m.key: effective_config(cfg, m, self.curve_parameters.get(m.key)) for m in self.maps
+        }
+        self.configuration_records = {
+            m.key: configuration_record(cfg, m, self.curve_parameters.get(m.key)) for m in self.maps
+        }
+        context_records = configuration_context_records(cfg, self.maps, self.curve_parameters)
+        self.configuration_contexts = {}
+        for key, context in context_records.items():
+            context_id = context["configuration_context_id"]
+            self.configuration_records[key]["configuration_context_id"] = context_id
+            self.configuration_contexts[context_id] = context["document"]
+        self.evaluation_configs = deepcopy(evaluation_configs or {})
+        unknown = set(self.evaluation_configs) - {m.key for m in self.maps}
+        if unknown:
+            raise ValueError(f"Evaluation configurations contain inactive or unmapped curve identities: {sorted(unknown)}")
+        for evaluation_cfg in self.evaluation_configs.values():
+            validate_config(evaluation_cfg)
         self.books = books
         self._curve_labels = {m.key: m.label for m in self.maps}
         self.cross: dict[tuple, EWCov] = {}  # (mode, curve, other curve, group) -> co-movement
 
     # ------------------------------------------------------------------ run
     def _build_series(self) -> list[Series]:
-        cfg = self.cfg
         by_curve = {key: frame for key, frame in self.vwaps.groupby(curve_keys(self.vwaps), sort=False)}
         out = []
         for m in self.maps:
+            cfg = self.curve_configs[m.key]
             g = by_curve.get(m.key)
             legacy_book = self.books.get(m.product) if not m.region and not m.unit else None
             out.append(Series(
@@ -169,8 +204,8 @@ class CurveFiller:
             raise ValueError("The start date cannot be later than the end date")
         warm = start - timedelta(days=cfg.warmup_days) if cfg.warmup_days else date.min
         EexBook.cutoff_date(start, cfg.eex_offset_days)
-        log.info("Engine %s -> %s | mode=%s | cross=%s | EEX offset=%d | warmup=%s",
-                 start, end, cfg.basis_mode, cfg.layer_cross, cfg.eex_offset_days,
+        log.info("Engine %s -> %s | configuration=%s | EEX offset=%d | warmup=%s",
+                 start, end, cfg.configuration_mode, cfg.eex_offset_days,
                  f"{cfg.warmup_days} days (limited history)" if cfg.warmup_days else "all original history")
         if cfg.warmup_days:
             log.warning("Limited warmup: daily and a longer refill may use different history")
@@ -208,14 +243,15 @@ class CurveFiller:
             # The training clock is the observation's original date h. Release
             # each h once, only when same-date EEX could be known under today's
             # cutoff. Never train own_T against an older EEX snapshot.
-            trainer = CurveFiller(replace(cfg, eex_offset_days=0), self.vwaps, self.maps, self.books)
+            trainer = CurveFiller(replace(cfg, eex_offset_days=0), self.vwaps, self.maps, self.books,
+                                  curve_parameters=self.curve_parameters)
             trainer.cross = self.cross
             training_days = sorted({day for s in series for day in s.own_by_day if warm <= day <= end})
             for s in series:
                 if s.book is not None:
                     # Prediction clones share this read-through cache; cloning
                     # must not rebuild smoothing windows for every output day.
-                    s.fallback = EexFallback(s.book, s.hfn, cfg)
+                    s.fallback = EexFallback(s.book, s.hfn, self.curve_configs[s.key])
         for day in sorted(days):
             if trainer is not None and day < start:
                 continue
@@ -241,14 +277,15 @@ class CurveFiller:
                     continue
                 try:
                     rows = self._fill(s, day, preps)
-                    if cfg.shape_mode == "off":
+                    curve_cfg = self.curve_configs[s.key]
+                    if curve_cfg.shape_mode == "off":
                         cons += check_day(rows, s.hfn)
                     else:
                         before = [{**r, "price": r["price_before_shape"],
                                    "source": r["source_before_shape"]} for r in rows]
                         cons += [{**r, "shape_stage": "before"} for r in check_day(before, s.hfn)]
                         cons += [{**r, "shape_stage": "after"} for r in check_day(rows, s.hfn)]
-                        if cfg.shape_mode == "audit":
+                        if curve_cfg.shape_mode == "audit":
                             proposed = [{**r, "price": r["shape_proposed_price"]} for r in rows]
                             cons += [{**r, "shape_stage": "proposed"}
                                      for r in check_day(proposed, s.hfn)]
@@ -279,13 +316,18 @@ class CurveFiller:
             if trainer is None:
                 self._update(series, day, preps)
         for name, ds in no_eex.items():
+            missing_cfg = next(self.curve_configs[s.key] for s in series if s.name == name)
             log.warning("%s: no EEX settlement within cutoff/age limits from %s to %s (%d days): "
                         "using own VWAPs (contract reconstruction enabled: %s)",
-                        name, ds[0], ds[-1], len(ds), cfg.layer_arbitrage)
-        return RunResult(pd.DataFrame(filled), pd.DataFrame(cons), pd.DataFrame(loo_rows), errors)
+                        name, ds[0], ds[-1], len(ds), missing_cfg.layer_arbitrage)
+        context_ids = {row["configuration_context_id"] for row in filled}
+        context_ids.update(row["configuration_context_id"] for row in loo_rows)
+        contexts = {context_id: deepcopy(self.configuration_contexts[context_id]) for context_id in sorted(context_ids)}
+        return RunResult(pd.DataFrame(filled), pd.DataFrame(cons), pd.DataFrame(loo_rows), errors, contexts)
 
     # ------------------------------------------------------- prepare the day
-    def _own_quotes(self, day: date, g: pd.DataFrame | None, hfn) -> dict[Key, OwnQuote]:
+    def _own_quotes(self, day: date, g: pd.DataFrame | None, hfn, *,
+                    cfg: Config | None = None) -> dict[Key, OwnQuote]:
         """Aggregate equal delivery intervals independently of input row order.
 
         Each positive finite volume weights its price; zero or unknown volume
@@ -300,9 +342,10 @@ class CurveFiller:
         """
         if g is None:
             return {}
+        cfg = self.cfg if cfg is None else cfg
         grouped: dict[Key, list[tuple[Period, str, float, float]]] = {}
         for tenor, vwap, vol in g[["tenor", "vwap", "volume"]].itertuples(index=False):
-            per = resolve_tenor(tenor, day, self.cfg.day_convention, self.cfg.weekend_offset)
+            per = resolve_tenor(tenor, day, cfg.day_convention, cfg.weekend_offset)
             if per is None or not math.isfinite(float(vwap)):
                 continue
             # Peak BOW/BOM may share dates with WE/Day but have no delivery
@@ -337,13 +380,13 @@ class CurveFiller:
         return out
 
     def _prep(self, s: Series, day: date) -> DayPrep:
-        cfg = self.cfg
+        cfg = self.curve_configs[s.key]
         for hist in s.hist.values():
             hist.expire(day, cfg.hist_max_age_days)
         quotes, asof = (s.book.available_quotes(day, cfg.max_stale_days, cfg.eex_offset_days)
                        if s.book is not None else ({}, None))
         eex = Pricer(quotes, s.hfn)
-        own = self._own_quotes(day, s.own_by_day.get(day), s.hfn)
+        own = self._own_quotes(day, s.own_by_day.get(day), s.hfn, cfg=cfg)
         candidates, bad, rejected = [], [], set()
         for q in own.values():
             # Liquidity is observable without EEX. Apply it before reference
@@ -362,11 +405,11 @@ class CurveFiller:
                 continue
             candidates.append(Anchor(",".join(q.tenors), q.period, q.vwap, r[0], q.volume,
                                   log_ttm(q.period, day)))
-        by_mode = {md: [a for a in candidates if self._usable_anchor(a, md)] for md in MODES}
+        by_mode = {md: [a for a in candidates if self._usable_anchor(a, md, cfg=cfg)] for md in MODES}
         # Auto can use every additive anchor; each target later selects its mode.
         summary_mode = "additive" if cfg.basis_mode == "auto" else cfg.basis_mode
         anchors = by_mode[summary_mode]
-        rejected.update(a.period.key for a in candidates if not self._usable_anchor(a, summary_mode))
+        rejected.update(a.period.key for a in candidates if not self._usable_anchor(a, summary_mode, cfg=cfg))
         if bad:
             get_logger().warning("%s %s: anchors excluded by volume/deviation; originals preserved: %s",
                                  day, s.name, "; ".join(bad))
@@ -381,22 +424,41 @@ class CurveFiller:
                 for k, v in daily_basis(by_mode[md], md).items():
                     if (k in GROUPS or k == "all") and k in h:
                         mode_surprises[md][k] = v - h[k]
+        evaluation_candidates = candidates
+        if s.key in self.evaluation_configs:
+            # A candidate's liquidity/deviation filter must not remove difficult
+            # observations from the exam. Tuning can freeze truth eligibility
+            # independently while retaining candidate filters for predictions.
+            evaluation_cfg = self.evaluation_configs[s.key]
+            evaluation_candidates = []
+            for q in own.values():
+                if math.isfinite(q.volume) and q.volume < evaluation_cfg.min_volume:
+                    continue
+                r = eex.price(q.period.start, q.period.end, kind=q.period.kind)
+                if r is None or not math.isfinite(r[0]):
+                    continue
+                deviation = abs(q.vwap - r[0]) / max(abs(r[0]), evaluation_cfg.ratio_eex_floor)
+                if evaluation_cfg.max_anchor_dev > 0 and deviation > evaluation_cfg.max_anchor_dev:
+                    continue
+                evaluation_candidates.append(Anchor(",".join(q.tenors), q.period, q.vwap, r[0], q.volume,
+                                                    log_ttm(q.period, day)))
         return DayPrep(asof, eex, own, anchors, mode_surprises[summary_mode],
-                       rejected, by_mode, candidates, mode_surprises)
+                       rejected, by_mode, evaluation_candidates, mode_surprises)
 
-    def _usable_anchor(self, a: Anchor, mode: str) -> bool:
+    def _usable_anchor(self, a: Anchor, mode: str, *, cfg: Config | None = None) -> bool:
+        cfg = self.cfg if cfg is None else cfg
         if not (math.isfinite(a.own) and math.isfinite(a.eex)):
             return False
         if mode == "additive":
             return True
-        if abs(a.eex) < self.cfg.ratio_eex_floor:
+        if abs(a.eex) < cfg.ratio_eex_floor:
             return False
         factor = a.own / a.eex
-        return factor > 0 and abs(factor - 1) <= self.cfg.max_ratio_deviation
+        return factor > 0 and abs(factor - 1) <= cfg.max_ratio_deviation
 
     # -------------------------------------------------- enhancements 1 and 2
     def _kind_factor(self, s: Series, use_corr: bool, mode: str) -> KindFactor:
-        cfg = self.cfg
+        cfg = self.curve_configs[s.key]
         base = distance_kind_factor(cfg.other_kind_weight)
         if not use_corr:
             return base
@@ -413,7 +475,7 @@ class CurveFiller:
 
     def _cross_adj(self, s: Series, per: Period, preps: dict, mode: str) -> tuple[float, list[str]] | None:
         """Today's correlated surprises in the selected mode, scaled by beta."""
-        cfg = self.cfg
+        cfg = self.curve_configs[s.key]
         num = den = 0.0
         used = []
         for key, p in preps.items():
@@ -433,7 +495,7 @@ class CurveFiller:
         return (num / den, used) if den > 0 else None
 
     def _hist_for(self, s: Series, per: Period, mode: str) -> float | None:
-        cfg = self.cfg
+        cfg = self.curve_configs[s.key]
         if cfg.layer_hist == "off":
             return None
         if cfg.layer_hist == "auto" and not s.skill[mode].use_hist(per.group, cfg.hist_auto_min_obs):
@@ -442,7 +504,7 @@ class CurveFiller:
 
     def _select_mode(self, s: Series, per: Period, eex: float | None, p: DayPrep) -> tuple[str, str]:
         """Select a target's mode from visible anchors and usable past history."""
-        cfg = self.cfg
+        cfg = self.curve_configs[s.key]
         if cfg.basis_mode != "auto":
             return cfg.basis_mode, ""
         if eex is not None and abs(eex) < cfg.ratio_eex_floor:
@@ -458,7 +520,7 @@ class CurveFiller:
 
     # ------------------------------------------------------------ fill
     def _fill(self, s: Series, day: date, preps: dict, labels: list[str] | None = None) -> list[dict]:
-        cfg = self.cfg
+        cfg = self.curve_configs[s.key]
         p = preps[s.key]
         kind_factors = {md: self._kind_factor(s, cfg.layer_correlation, md) for md in MODES}
         rows, pending = [], []
@@ -478,6 +540,7 @@ class CurveFiller:
             r = p.eex.price(per.start, per.end, kind=per.kind)
             mode, auto_reason = self._select_mode(s, per, r[0] if r is not None else None, p)
             row = {
+                **self.configuration_records[s.key],
                 "reference_date": day, "product": s.m.product,
                 "region": s.m.region, "unit": s.m.unit, "area": s.m.area,
                 "profile": s.m.profile, "tenor": label, "kind": per.kind, "period": per.name,
@@ -580,9 +643,9 @@ class CurveFiller:
     def _update(self, series: list[Series], day: date, preps: dict) -> None:
         """Use only real VWAPs and same-day EEX: stale EEX would mix market
         movements into the estimated basis."""
-        cfg = self.cfg
         series = [s for s in series if s.key in preps and preps[s.key].asof == day]
         for s in series:
+            cfg = self.curve_configs[s.key]
             p = preps[s.key]
             for mode in MODES:
                 # Each mode has its own historical skill and covariance units.
@@ -615,7 +678,7 @@ class CurveFiller:
           eex, local_*, hist_*, blend_*   (in ratio and additive modes)
           local_corr, blend_corr          (enhancement 1, both modes in auto)
           hist_cross                      (enhancement 2: no own anchors today)"""
-        cfg = self.cfg
+        cfg = self.curve_configs[s.key]
         p = preps[s.key]
         kf_dist = distance_kind_factor(cfg.other_kind_weight)
         kf_corr = {md: self._kind_factor(s, True, md) for md in MODES}
@@ -624,7 +687,8 @@ class CurveFiller:
             others = [x for x in p.anchors if x.period.key != a.period.key]
             others_by_mode = {md: [x for x in p.mode_anchors[md] if x.period.key != a.period.key]
                               for md in MODES}
-            base = {"reference_date": day, "product": s.m.product,
+            base = {**self.configuration_records[s.key],
+                    "reference_date": day, "product": s.m.product,
                     "region": s.m.region, "unit": s.m.unit, "tenor": a.tenor,
                     "kind": a.period.kind, "group": a.period.group, "own": a.own,
                     "volume": a.volume, "n_other_anchors": len(others),
@@ -653,7 +717,8 @@ class CurveFiller:
                 applied_modes.update({method: m for method in preds if method.endswith(f"_{m}")})
             # Hide the observation from every mode before auto selects a mode.
             hidden = replace(p, own={k: q for k, q in p.own.items() if k != a.period.key},
-                             anchors=others, mode_anchors=others_by_mode)
+                             anchors=others, mode_anchors=others_by_mode,
+                             rejected=p.rejected - {a.period.key})
             # Score the same canonical contract kind used by the observation's
             # evidence and diagnostic group, even if a residual alias sorts first.
             label = next(label for label in p.own[a.period.key].tenors

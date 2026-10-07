@@ -24,6 +24,7 @@ from vwaps.hours import hours_fn
 from vwaps.identity import CurveKey, IDENTITY_COLUMNS, curve_keys, normalize_identity
 from vwaps.io_eex import EexBook
 from vwaps.mapping import ProductMap
+from vwaps.product_config import MODEL_PARAMETER_FIELDS, effective_config
 from vwaps.pricer import Pricer
 from vwaps.tenors import resolve_tenor
 
@@ -31,15 +32,9 @@ from vwaps.tenors import resolve_tenor
 TUNABLE_FIELDS = (
     "basis_mode", "tau_log", "shrink_k", "layer_hist", "layer_correlation", "layer_cross",
 )
-EXPERIMENT_TUNABLE_FIELDS = (*TUNABLE_FIELDS,
-    "layer_local", "layer_arbitrage", "other_kind_weight",
-    "ewma_halflife_days", "hist_max_age_days", "hist_auto_min_obs",
-    "corr_halflife_days", "corr_prior_obs", "cross_min_corr", "cross_min_obs", "cross_halflife_days",
-    "fallback_price_method", "fallback_price_window", "fallback_ewma_halflife",
-    "fallback_spread_window", "fallback_anchor_months", "shape_mode", "shape_adjust_originals",
-    "shape_smoothness_weight", "shape_coherence_weight", "shape_max_abs_adjustment",
-    "shape_original_weight", "shape_coherence_tolerance",
-)
+# Targets describe the task, not a competing model: changing them between
+# candidates would compare different delivery contracts.
+EXPERIMENT_TUNABLE_FIELDS = tuple(name for name in MODEL_PARAMETER_FIELDS if name != "tenors")
 PAIR_KEYS = ["reference_date", *IDENTITY_COLUMNS, "tenor"]
 EEX_POLICY_COLUMNS = ["eex_asof", "eex_cutoff_date", "eex_offset_days"]
 
@@ -231,6 +226,10 @@ def tune_parameters(
     *, observer: Callable[[str, dict], None] | None = None,
     extended_grid: bool = False,
     include_curve_outputs: bool = False,
+    target_curve: CurveKey | None = None,
+    curve_parameters: dict[CurveKey, dict] | None = None,
+    date_split: tuple[list[date], list[date]] | None = None,
+    fixed_evaluation: bool = False,
 ) -> TuneResult:
     """Choose on calibration dates only, then evaluate just the winner later.
 
@@ -252,10 +251,17 @@ def tune_parameters(
     stage, trial ID and copied full ``filled`` output. These curves retain
     observed originals; they are not the withheld predictions used to score
     accuracy. No additional engine run or holdout candidate is evaluated.
-    ``extended_grid=True`` additionally admits the explicitly listed safe
-    experiment controls. Observation filters, identities, calendars, targets
-    and staleness limits remain fixed, and every trial must retain the same
-    EEX/held-out observation universe. The existing CLI uses the six-field grid.
+    ``target_curve`` selects one exact product/region/unit identity. Only that
+    curve receives candidate parameters; other active curves remain helpers
+    under their original effective settings. Global selection ignores mapping
+    overrides. Extended searches may vary anchor filters: their held-out truth
+    universe then uses filters disabled, independently of candidate settings.
+    Targets, identities, calendars and EEX availability remain fixed.
+    ``fixed_evaluation=True`` disables minimum volume and maximum deviation
+    only when constructing the truth sample; candidate anchor rules still
+    apply. ``date_split`` lets related searches share a chronological cutoff.
+    An empty grid plus ``curve_parameters`` evaluates fixed product settings
+    together without selecting among alternatives.
     """
     def notify(event: str, **payload) -> None:
         if observer is not None:
@@ -269,11 +275,42 @@ def tune_parameters(
         raise ValueError("validation_days must be a positive integer")
     if not isinstance(include_curve_outputs, bool):
         raise ValueError("include_curve_outputs must be a boolean")
+    if curve_parameters is not None and (target_curve is not None or parameter_grid):
+        raise ValueError("Fixed curve_parameters require an empty grid and no target_curve")
+    engine_cfg = (cfg if target_curve is not None or curve_parameters is not None else
+                  replace(cfg, **cfg.command_overrides, command_overrides={}, configuration_mode="global"))
+    if target_curve is not None:
+        targets = [mapping for mapping in maps if mapping.active and mapping.use == "fill"
+                   and mapping.key == target_curve]
+        if len(targets) != 1:
+            raise ValueError("target_curve must identify exactly one active fill mapping")
+        maps = [replace(mapping, use="helper") if mapping.active and mapping.key != target_curve
+                else mapping for mapping in maps]
+        cfg = effective_config(engine_cfg, targets[0])
+    else:
+        cfg = engine_cfg
     candidates = _candidates(cfg, parameter_grid, max_trials, extended_grid=extended_grid)
+    if curve_parameters is not None:
+        candidates = [{}]
+    # Candidate filters affect available anchors, never which truths are scored.
+    evaluation_configs = None
+    if fixed_evaluation or {"min_volume", "max_anchor_dev", "ratio_eex_floor"}.intersection(parameter_grid):
+        evaluation_configs = {
+            mapping.key: replace(effective_config(engine_cfg, mapping), min_volume=0.0, max_anchor_dev=0.0)
+            for mapping in maps if mapping.active and mapping.use == "fill"
+        }
     dates = _observation_dates(cfg, vw, maps, start, end)
-    if len(dates) < validation_days + 2:
+    if date_split is None and len(dates) < validation_days + 2:
         raise ValueError("Tuning needs at least two calibration observation dates plus the requested validation_days")
     calibration_dates, holdout_dates = dates[:-validation_days], dates[-validation_days:]
+    if date_split is not None:
+        calibration_dates, holdout_dates = (list(part) for part in date_split)
+        joined = calibration_dates + holdout_dates
+        if (not calibration_dates or not holdout_dates or joined != sorted(set(joined))
+                or joined[0] < start or joined[-1] > end):
+            raise ValueError("date_split requires ordered unique calibration then holdout dates inside the requested range")
+        if len(set(dates).intersection(calibration_dates)) < 2 or not set(dates).intersection(holdout_dates):
+            raise ValueError("Each selected curve needs two observed calibration dates and an observed holdout date")
     _check_holdout_coverage(cfg, vw, maps, books, holdout_dates)
     notify("started", candidates=candidates, calibration_dates=calibration_dates,
            validation_dates=holdout_dates)
@@ -283,12 +320,23 @@ def tune_parameters(
 
     def evaluate(parameters: dict, days: list[date], label: str, *, trial_id: int, stage: str) -> pd.DataFrame:
         candidate_cfg = replace(cfg, **parameters)
+        engine_options = {}
+        if target_curve is not None:
+            candidate_cfg = engine_cfg
+            engine_options["curve_parameters"] = {target_curve: parameters}
+        elif curve_parameters is not None:
+            engine_options["curve_parameters"] = curve_parameters
+        if evaluation_configs is not None:
+            engine_options["evaluation_configs"] = evaluation_configs
         try:
-            result = CurveFiller(candidate_cfg, vw, maps, books).run(days[0], days[-1], loo=True)
+            result = CurveFiller(candidate_cfg, vw, maps, books, **engine_options).run(days[0], days[-1], loo=True)
         except Exception as exc:
             raise ValueError(f"{label} failed: {exc}") from exc
         if result.errors:
             raise ValueError(f"{label} failed with {len(result.errors)} engine errors; no partial tuning result")
+        if observer is not None:
+            notify("configuration_evaluated", trial_id=trial_id, stage=stage,
+                   configuration_contexts=getattr(result, "configuration_contexts", {}))
         if include_curve_outputs and observer is not None:
             notify("curves_evaluated", trial_id=trial_id, stage=stage, filled=result.filled)
         return _paired(result.loo, days, label)
@@ -377,4 +425,14 @@ def tune_parameters(
         "warmup_days": 0,
         "validation_protocol": "fixed_selected_parameters_with_chronological_original_history_updates",
     }
+    if target_curve is not None:
+        metadata.update(search_scope="individual", target_curve=list(target_curve),
+                        helper_configuration="fixed_original_effective_settings")
+    elif curve_parameters is not None:
+        metadata.update(search_scope="combined_verification", optimization=False,
+                        curve_parameters=[{"product": key[0], "region": key[1], "unit": key[2],
+                                           "parameters": values} for key, values in curve_parameters.items()])
+    if evaluation_configs is not None:
+        metadata["evaluation_filters"] = {"min_volume": 0.0, "max_anchor_dev": 0.0,
+                                           "reason": "candidate_independent_truth_universe"}
     return TuneResult(calibration_report, validation_report, selected, metadata)

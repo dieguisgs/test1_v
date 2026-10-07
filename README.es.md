@@ -23,9 +23,12 @@ Región/unidad vacías son valores literales, nunca comodines. El producto no pu
 
 **Etapa posterior opcional:** [shape](SHAPE.es.md) está implementada y apagada por defecto. Audita o ajusta precios finitos existentes. Solo puede mover precios propios con `shape.adjust_originals=true`; conserva las columnas del input.
 
+
+**Configuración global o individual implementada:** `[run].configuration_mode` elige `global` (predeterminado, ignora celdas individuales) o `individual` (aplica por curva las celdas no vacías del mapping CSV/Excel). Se pueden sustituir los 33 controles escalares y la lista `tenors`; no son perfiles cerrados. [CONFIGURATION.es.md](CONFIGURATION.es.md) explica las 34 columnas, herencia, prioridad del CLI, diario/refill/catchup y trazabilidad. La búsqueda global o por producto de MLflow es una elección independiente: el Excel guarda una configuración fija, y el notebook/JSON guarda las mallas.
+
 ## Configuración mínima para empezar
 
-No necesitas ajustar las 59 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
+No necesitas ajustar las 60 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
 no son parámetros estadísticos. Para arrancar, revisa `[paths]`, genera y revisa el mapping,
 elige `[targets].tenors` y deja `method.basis_mode = "auto"`. Mantén los demás valores
 iniciales, incluidas `correlation = false`, `cross = false`, `arbitrage = false` y `shape.mode = "off"`.
@@ -53,6 +56,14 @@ manda la cobertura, cómo se promedia el error modelo/EEX por curva y por qué l
 
 ## Instalación
 
+En la máquina donde están los datos reales, clona el repositorio o copia sus archivos de
+código y documentación a una carpeta de trabajo. No hace falta ningún archivo comprimido:
+
+```powershell
+git clone https://github.com/dieguisgs/test1_v.git
+cd test1_v
+```
+
 Requiere Python 3.11 o posterior. Desde la carpeta del proyecto, utiliza una de estas opciones:
 
 ```powershell
@@ -68,15 +79,24 @@ python -m venv .venv
 
 Los ejemplos siguientes usan el `python` de ese entorno. En PowerShell, actívalo con `.venv\Scripts\Activate.ps1`, utiliza directamente `.venv\Scripts\python.exe` o antepón `uv run` a los comandos si utilizas uv.
 
+Crea el entorno en la máquina de destino; no copies `.venv` de otro ordenador. Para los dos
+notebooks y MLflow local instala los grupos opcionales con
+`uv sync --group notebook --group experiment` y selecciona ese entorno como kernel.
+Las explicaciones, el código y la interfaz de los notebooks están en inglés; las guías
+Markdown están disponibles en inglés y español.
+
 ## Configurar el input real
 
-Hay **un único archivo de configuración, `config.toml`**, tanto aquí como en el ZIP portable.
+Hay **un archivo principal de configuración, `config.toml`**, en el repositorio de código.
 La ruta inicial es `data/vwaps.xlsx`: cámbiala por el input real acumulado de la máquina de
 destino. Todos los comandos habituales `python run.py ...` utilizan ese único config.
 Para una prueba independiente, usa expresamente `--vwap data/synthetic_vwaps.csv` si has
 generado ese fichero; el valor por defecto nunca selecciona la demo silenciosamente.
 
-El ZIP portable excluye el mapeo local, los inputs sintéticos, los datos de EEX, el entorno virtual y los outputs generados. Instala las dependencias en la máquina de destino, incorpora tus archivos de entrada y EEX, y genera allí el mapeo.
+No se publican los inputs reales, los datos EEX, el mapping local, el entorno virtual ni las
+salidas generadas. Incorpora tus archivos de entrada y EEX en la máquina de destino, configura
+sus rutas como se explica abajo y genera/revisa allí el mapping. El ejemplo ficticio incluido
+en el repositorio tiene filas desactivadas; no sustituye las asignaciones de tus productos.
 
 Edita `[paths]` en la configuración elegida:
 
@@ -114,7 +134,7 @@ La lista objetivo se edita directamente en la configuración, sin cambiar Python
 tenors = ["D+1", "D+2", "WE", "M+1", "M+2", "M+3", "Q+1", "Cal+1"]
 ```
 
-Edita la sección existente para ampliar o reducir la lista. Se aplica a todos los productos `fill`. Se conservan los originales fuera de la lista, pero no se crean sus filas ausentes. Incluir un tenor permite estimarlo cuando hay datos suficientes; no garantiza que pueda calcularse.
+Edita la sección existente para ampliar o reducir la lista global. En modo global se aplica a todos los productos `fill`; en individual cada identidad puede sustituirla mediante una celda JSON `tenors` del mapping. Se conservan los originales fuera de la lista, pero no se crean sus filas ausentes. Incluir un tenor permite estimarlo cuando hay datos suficientes; no garantiza que pueda calcularse.
 
 ## Elegir el modo de cálculo
 
@@ -276,7 +296,7 @@ anchor_months = 2
 Estos controles no afectan a originales ni a precios con ajuste local/histórico/cross.
 Las ventanas de precio y spread son independientes: no se exige que una sea mayor que la otra.
 La antigüedad máxima controla el último snapshot permitido, no convierte las ventanas en
-ventanas de días naturales. Las 59 claves del config incluyen estos cinco controles.
+ventanas de días naturales. Las 60 claves del config incluyen estos cinco controles.
 
 En `daily`, `refill`, `catchup`, `backtest` y `tune` se pueden sustituir para una ejecución:
 
@@ -430,7 +450,7 @@ cuenta 12 horas todos los días; los demás tipos Peak cuentan solo lunes a vier
 
 | Parámetro | Defecto | Efecto de cambiarlo |
 |---|---|---|
-| `targets.tenors` | `D+1..D+3`, `WE..WE+3`, `BOW`, `W+1..W+4`, `BOM`, `M+1..M+10`, `Q+1..Q+8`, `Sum+1..Sum+3`, `Win+1..Win+3`, `Cal+1..Cal+3` | Edita la lista de etiquetas para añadir/quitar filas objetivo de todos los productos `fill`; se conservan los originales fuera de ella |
+| `targets.tenors` | `D+1..D+3`, `WE..WE+3`, `BOW`, `W+1..W+4`, `BOM`, `M+1..M+10`, `Q+1..Q+8`, `Sum+1..Sum+3`, `Win+1..Win+3`, `Cal+1..Cal+3` | Lista global de etiquetas objetivo; individual permite sustituirla por curva. Se conservan originales fuera de ella. |
 | `conventions.day` | `"calendar"` | `"business"` interpreta D+n contando lunes a viernes; no se incorpora un calendario de festivos |
 | `conventions.weekend_offset` | `0` | Desplaza WE+n propio este número de fines de semana al resolver la entrega |
 
@@ -479,6 +499,7 @@ se mantienen separadas por modo.
 
 | Parámetro | Defecto | Efecto de cambiarlo |
 |---|---|---|
+| `configuration_mode` | `"global"` | `global` ignora celdas de modelo del mapping; `individual` aplica valores no vacíos por curva. Véase [CONFIGURATION.es.md](CONFIGURATION.es.md). |
 | `warmup_days` | `0` | 0 reconstruye desde toda la historia original suministrada; N positivo limita el calentamiento a N días naturales y puede hacer que daily difiera de un refill más largo |
 
 Esta opción no recupera archivos que falten. En la máquina de destino deben estar los
@@ -543,7 +564,7 @@ las horas de entrega y una fuente de precios correspondiente.
 
 ## Ejecutar
 
-Después de ajustar las rutas del único `config.toml`, tanto aquí como en el ZIP extraído:
+Después de ajustar las rutas de `config.toml` en la máquina donde están el código y los datos reales:
 
 ```powershell
 python run.py mapping
@@ -765,7 +786,7 @@ garantiza mejor predicción ni continuidad al cambiar el calendario.
 
 ### Configuración completa [shape]
 
-Estas siete entradas completan las 59 claves del config. Los valores iniciales no están
+Estas siete entradas completan las 60 claves del config. Los valores iniciales no están
 calibrados. [SHAPE.es.md](SHAPE.es.md) detalla fórmulas, ejemplos, diagnóstico e histórico.
 
 | Clave | Inicial | Significado y efecto |

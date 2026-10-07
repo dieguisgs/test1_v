@@ -24,15 +24,17 @@ files and checks whether the configured files exist.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
 from vwaps.config import Config
 from vwaps.identity import CurveKey, IDENTITY_COLUMNS, curve_keys, normalize_identity
+from vwaps.product_config import MODEL_PARAMETER_FIELDS, effective_config, parse_parameter_cells
 
 COLUMNS = [*IDENTITY_COLUMNS, "use", "area", "profile", "eex_file", "hours", "timezone", "comment"]
+PARAMETER_COLUMNS = list(MODEL_PARAMETER_FIELDS)
 USES = ("fill", "helper", "off")
 HOURS = ("Base", "Peak", "Peak7")
 
@@ -49,6 +51,7 @@ class ProductMap:
     comment: str = ""
     region: str = ""
     unit: str = ""
+    parameter_overrides: dict = field(default_factory=dict)
 
     @property
     def key(self) -> CurveKey:
@@ -64,17 +67,40 @@ class ProductMap:
         return f"{self.product} [region={self.region!r}, unit={self.unit!r}]"
 
 
-def load_mapping(cfg: Config) -> list[ProductMap]:
-    path = cfg.mapping_file
+def read_mapping_table(path: str | Path) -> pd.DataFrame:
+    """Read a CSV or the first sheet of an XLSX mapping without losing literals."""
+    path = Path(path)
     if not path.exists():
         raise FileNotFoundError(
             f"Product mapping does not exist: {path}. Create it with: python run.py mapping")
-    df = pd.read_csv(path, dtype=str, encoding="utf-8-sig", keep_default_na=False)
+    if path.suffix.lower() == ".xlsx":
+        df = pd.read_excel(path, sheet_name=0, dtype=str, keep_default_na=False, engine="openpyxl")
+    elif path.suffix.lower() == ".csv":
+        df = pd.read_csv(path, dtype=str, encoding="utf-8-sig", keep_default_na=False)
+    else:
+        raise ValueError("The product mapping must be a .csv or .xlsx file")
+    df.columns = [str(name).strip() for name in df.columns]
+    if df.columns.duplicated().any():
+        raise ValueError(f"{path.name}: duplicate mapping column names after trimming")
+    return df
+
+
+def load_mapping(cfg: Config) -> list[ProductMap]:
+    """Load exact identities and, in individual mode, their fixed model values."""
+    path = cfg.mapping_file
+    df = read_mapping_table(path)
     missing = [c for c in COLUMNS if c not in df.columns and c != "comment"]
     if missing:
         raise ValueError(f"{path.name}: missing columns {missing}. "
                          "Run python run.py mapping to migrate an unambiguous legacy mapping; "
                          "otherwise add one explicit row per product, region and unit.")
+    if cfg.configuration_mode not in ("global", "individual"):
+        raise ValueError("run.configuration_mode must be global or individual")
+    if cfg.configuration_mode == "individual":
+        unknown = [name for name in df.columns if name not in COLUMNS and name not in MODEL_PARAMETER_FIELDS]
+        if unknown:
+            raise ValueError(f"{path.name}: unknown individual configuration columns {unknown}. "
+                             "Use Config model parameter names; put notes in comment.")
     out, errors = [], []
     for i, r in df.iterrows():
         use = r["use"].strip().lower()
@@ -91,6 +117,12 @@ def load_mapping(cfg: Config) -> list[ProductMap]:
         ))
         if not out[-1].product:
             errors.append(f"row {i + 2}: product must not be empty")
+        if cfg.configuration_mode == "individual":
+            try:
+                out[-1].parameter_overrides = parse_parameter_cells(r)
+                effective_config(cfg, out[-1])
+            except ValueError as exc:
+                errors.append(f"row {i + 2} ({out[-1].label}): {exc}")
     if errors:
         raise ValueError("Mapping errors:\n  " + "\n  ".join(errors))
     keys = pd.Series([m.key for m in out], dtype=object)
