@@ -41,6 +41,8 @@ on your other computer. Its expanded model grid includes local reach, historical
 EEX averaging and shape; the guide lists the supported fields and evaluation limits.
 Install it with `uv sync --group notebook --group experiment`. It proposes parameters without
 applying them to the config or production curves.
+Both notebooks, including their explanations, code and interface text, are entirely in
+English. The standalone Markdown documentation is available in English and Spanish.
 
 ## Install
 
@@ -766,7 +768,7 @@ Alias aggregation, validation, output protection and scoring have been strengthe
 [Algorithm section 18](ALGORITHM.md#18-determinism-and-operational-integrity) explains the
 current operational rules. Passing tests does not demonstrate accuracy on real missing prices.
 
-The notebook starts in **Curva completa**, showing every saved contract for the selected curve
+The notebook starts in **Full curve (all contract types)**, showing every saved contract for the selected curve
 and date. To recreate the nine-family example on this or another computer, run
 `uv run python examples/generate_notebook_demo.py`, restart the kernel and execute every cell.
 The generated CSV is synthetic and is not published in GitHub.

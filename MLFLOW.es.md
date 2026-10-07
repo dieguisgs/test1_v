@@ -9,6 +9,8 @@ decide qué combinación gana. No añade una técnica de relleno ni cambia el cr
 
 El [visor de curvas](NOTEBOOK.es.md) es otro notebook: muestra curvas ya guardadas. Este
 notebook de experimentos carga datos, ejecuta backtests y guarda informes en `output/mlflow`.
+Ambos notebooks están íntegramente en inglés: explicaciones, código, comentarios, etiquetas
+y mensajes. Las guías Markdown independientes siguen disponibles en inglés y español.
 
 ## 1. Instalar y abrir
 

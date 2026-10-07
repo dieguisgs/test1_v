@@ -9,6 +9,8 @@ combination wins. It does not add a new refill method or change the selection ob
 
 The separate [curve viewer](NOTEBOOK.md) displays saved curves. This experiment notebook
 loads data, executes backtests and writes experiment reports under `output/mlflow`.
+Both notebooks use English throughout: explanations, code, comments, labels and messages.
+The standalone Markdown guides remain available in English and Spanish.
 
 ## 1. Install and open
 

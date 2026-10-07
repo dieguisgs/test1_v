@@ -31,8 +31,10 @@ python -m pip install "numpy>=1.26" "pandas>=2.2" "openpyxl>=3.1" "jupyterlab>=4
 python -m jupyter lab notebooks/inspect_curves.ipynb
 ```
 
-Selecciona el kernel Python de ese entorno y ejecuta las celdas en orden. La interfaz está
-en español; el código y los docstrings, en inglés. No hacen falta los inputs originales.
+Selecciona el kernel Python de ese entorno y ejecuta las celdas en orden. Ambos notebooks
+usan inglés en explicaciones, interfaces, código, comentarios y docstrings. Las guías
+Markdown independientes están disponibles en inglés y español. Ninguna de las dos opciones
+de instalación del visor requiere los inputs originales.
 
 ### Abrirlo en Visual Studio Code
 
@@ -107,9 +109,9 @@ proceso lo está escribiendo durante la consulta.
 
 ## Tres vistas distintas
 
-**Una fecha.** Selecciona la identidad completa `(product, region, unit)` y la fecha de referencia.
-La selección inicial es **Curva completa (todos los tipos)**: muestra juntos todos los contratos
-guardados para esa curva y fecha. El selector **Vista** permite limitarse a Month, Quarter,
+**Single date — una fecha.** Selecciona la identidad completa `(product, region, unit)` y la fecha de referencia.
+La selección inicial es **Full curve (all contract types)**: muestra juntos todos los contratos
+guardados para esa curva y fecha. El selector **View:** permite limitarse a Month, Quarter,
 Year o cualquier otro tipo presente en el CSV, conservando todos sus vencimientos. No hay
 un límite de dos trimestres ni de seis meses. Compara el `price` final con `eex_settle`.
 Opcionalmente muestra marcadores de
@@ -129,11 +131,11 @@ El ejemplo anterior tenía únicamente seis meses y dos trimestres; el ejemplo a
 las nueve familias. Tras regenerar un CSV o actualizar el notebook, reinicia el kernel y ejecuta
 todas las celdas para recargar los datos y las funciones.
 
-**Medias por rango.** Elige fechas inicial/final inclusivas, alineación y pulsa **Comparar
-rango**. Por defecto se sigue la misma entrega absoluta aunque cambie su etiqueta. La
+**Range means — medias por rango.** Elige fechas inicial/final inclusivas, alineación y pulsa
+**Compare range**. Por defecto se sigue la misma entrega absoluta aunque cambie su etiqueta. La
 alineación por tenor relativo mezcla entregas intencionadamente: M+1 en septiembre y M+1 en
 octubre son contratos distintos. Se muestra un aviso y el contador `n_delivery_periods`.
-Esta pestaña también respeta **Vista**: curva completa o todos los vencimientos de un tipo.
+Esta pestaña también respeta **View:**: curva completa o todos los vencimientos de un tipo.
 El eje separa cada contrato; en alineación absoluta usa etiquetas de entrega y en relativa,
 etiquetas de tenor. Las líneas siguen separadas por tipo.
 
@@ -144,7 +146,7 @@ pueden tener fechas y tamaños de muestra diferentes: no se exige una intersecci
 fechas entre todos los contratos. Una cotización EEX antigua puede repetirse en varias fechas
 de referencia, como corresponde al peso diario; consulta su fecha de publicación.
 
-**Evolución de una entrega.** Elige un contrato absoluto y sigue su precio entre fechas,
+**Fixed delivery evolution — evolución de una entrega.** Elige un contrato absoluto y sigue su precio entre fechas,
 aunque cambie de etiqueta relativa. Esta vista usa todo su historial guardado, independientemente
 del rango de la pestaña de medias. Los cambios pueden proceder de nueva información, otra
 ruta de cálculo o shape; el gráfico no diagnostica por sí solo la causa.

@@ -41,6 +41,8 @@ en el otro ordenador. Su grid ampliado incluye alcance local, memoria histórica
 y shape; la guía detalla los campos admitidos y los límites de evaluación.
 Instálalo con `uv sync --group notebook --group experiment`. Propone parámetros sin aplicarlos
 al config ni a las curvas de producción.
+Ambos notebooks, incluidas sus explicaciones, código y textos de interfaz, están íntegramente
+en inglés. La documentación Markdown independiente está disponible en inglés y español.
 
 ## Instalación
 
@@ -773,7 +775,7 @@ límites pendientes. Se han reforzado la agregación de aliases, las validacione
 de archivos y las métricas. La [sección 18 del algoritmo](ALGORITMO.md#18-resultados-reproducibles-e-integridad-de-ejecución)
 explica las reglas operativas actuales. Pasar tests no demuestra precisión en huecos reales.
 
-El notebook inicia en **Curva completa**, con todos los contratos guardados para la curva y
+El notebook inicia en **Full curve (all contract types)**, con todos los contratos guardados para la curva y
 fecha seleccionadas. Para reproducir aquí o en otro ordenador el ejemplo de nueve familias:
 `uv run python examples/generate_notebook_demo.py`. Después reinicia el kernel y ejecuta todas
 las celdas. El CSV generado es sintético y no se publica en GitHub.

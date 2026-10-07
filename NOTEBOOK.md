@@ -31,8 +31,10 @@ python -m pip install "numpy>=1.26" "pandas>=2.2" "openpyxl>=3.1" "jupyterlab>=4
 python -m jupyter lab notebooks/inspect_curves.ipynb
 ```
 
-Select the Python kernel from that environment and run the cells in order. The interface is
-in Spanish; code and docstrings are in English. Neither method requires the original input data.
+Select the Python kernel from that environment and run the cells in order. Both notebooks
+use English for explanations, interfaces, code, comments and docstrings. The standalone
+Markdown guides are available in English and Spanish. Neither viewer installation method
+requires the original input data.
 
 ### Open in Visual Studio Code
 
@@ -106,9 +108,9 @@ the same CSV during inspection.
 
 ## The three views
 
-**Una fecha — one reference date.** Select the exact `(product, region, unit)` identity and
-reference date. The default **Curva completa (todos los tipos)** view shows all saved contracts
-for that curve and date together. The **Vista** selector can restrict the chart to Month,
+**Single date.** Select the exact `(product, region, unit)` identity and
+reference date. The default **Full curve (all contract types)** view shows all saved contracts
+for that curve and date together. The **View:** selector can restrict the chart to Month,
 Quarter, Year or any other kind present in the CSV, retaining all its maturities. There is
 no two-quarter or six-month limit. The chart compares final `price` with saved
 `eex_settle`. Optional markers show `own_vwap`; an optional line shows `price_before_shape`.
@@ -127,12 +129,12 @@ contained only six months and two quarters; the expanded example includes all ni
 After regenerating a CSV or updating the notebook, restart the kernel and run all cells to
 reload both data and functions.
 
-**Medias por rango — date-range averages.** Choose inclusive start/end dates, alignment,
-then click **Comparar rango**. Default alignment follows the same absolute delivery period
+**Range means.** Choose inclusive start/end dates, alignment,
+then click **Compare range**. Default alignment follows the same absolute delivery period
 through label changes. Relative-tenor alignment deliberately combines different deliveries:
 M+1 in September and M+1 in October are different contracts. The notebook displays a warning
 and reports `n_delivery_periods`.
-This tab also follows **Vista**, showing the full curve or all contracts of one kind. Each
+This tab also follows **View:**, showing the full curve or all contracts of one kind. Each
 contract has its own horizontal position, labelled by delivery for absolute alignment or
 by tenor for relative alignment. Lines remain separate by kind.
 
@@ -143,7 +145,7 @@ Different points may have different paired dates and sample sizes; this is not a
 common-date intersection across all contracts. A stale EEX quote can therefore appear on more
 than one reference date, which is consistent with daily weighting; inspect its publication date.
 
-**Evolución de una entrega — fixed-contract evolution.** Choose an absolute delivery period.
+**Fixed delivery evolution.** Choose an absolute delivery period.
 The chart follows it through reference dates even when its relative label changes. It shows
 the entire saved history for that contract, independently of the range-average date controls.
 Price changes can reflect new data, a different calculation route or shape adjustment; the

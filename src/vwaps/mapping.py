@@ -147,7 +147,7 @@ def check_mapping(maps: list[ProductMap], cfg: Config, vwaps: pd.DataFrame | Non
         n = int(counts.get(m.key, 0))
         rows.append({"product": m.product, "region": m.region, "unit": m.unit,
                      "use": m.use, "eex_file": m.eex_file or "(no EEX)",
-                     "eex": eex, "eex_desde": first, "eex_hasta": last, "vwaps": n,
+                     "eex": eex, "eex_from": first, "eex_to": last, "vwaps": n,
                      "hours": m.hours, "comment": m.comment})
     return pd.DataFrame(rows)
 
