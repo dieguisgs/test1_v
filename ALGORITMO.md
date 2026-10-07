@@ -2099,7 +2099,7 @@ de calibración con comparaciones realmente emparejadas. El ejemplo prueba 18 co
 | `--validation-days` | `20` | Número positivo de últimas fechas distintas con observaciones válidas que se reservan; no días naturales consecutivos |
 | `--max-trials` | `50` | Límite positivo del producto cartesiano; si se supera, rechaza la rejilla en lugar de truncarla |
 
-Se exploran **solo esas seis opciones de modelo**. Los demás controles siguen como estén en
+El CLI explora **esas seis opciones de modelo**. Los demás controles siguen como estén en
 config. Con los valores por defecto se prueban tres modos, conservando los otros cinco campos.
 Cambiar parámetros como caducidad o volumen requiere una comparación explícita adicional;
 tune no explora automáticamente todo el inventario de configuración.
@@ -2293,7 +2293,7 @@ En `daily`, `refill`, `catchup`, `backtest` y `tune` se pueden sustituir para un
 | `--eex-anchor-months N` | `anchor_months` |
 
 Por ejemplo, `python run.py daily --eex-price-method simple --eex-price-window 5`.
-Si se omiten, se usa TOML; no se modifica el archivo. En tune estos valores quedan fijos
+Si se omiten, se usa TOML; no se modifica el archivo. En tune por CLI estos valores quedan fijos
 para todos los candidatos: no añaden dimensiones a la rejilla de seis controles.
 
 ### Resultado, auditoría y actualización de salidas anteriores
@@ -2488,7 +2488,7 @@ de años por sí solo no garantiza cobertura adecuada.
 
 `pipeline_configured` del backtest incluye shape después de ocultar el periodo evaluado y
 sus alias. La memoria continúa aprendiendo solo originales reales después de predecir.
-Tune conserva sus seis dimensiones de búsqueda; shape queda fijo en toda la rejilla y se
+Tune por CLI conserva sus seis dimensiones de búsqueda; shape queda fijo en toda la rejilla y se
 guarda en el snapshot de configuración. Comparar distintas configuraciones de shape requiere
 ejecuciones controladas sobre los mismos casos.
 
@@ -2557,3 +2557,53 @@ del modelo. Estas reglas forman parte del algoritmo y de su ejecución:
 Estas correcciones cambian resultados en los casos afectados: genera otra carpeta de salida
 para compararlos con ejecuciones anteriores. No validan precisión con propios reales que no
 tenemos ni seleccionan mejores familias de anclas; véase [la investigación](ANCHORS.es.md).
+
+## 19. Experimentos de parámetros y registro opcional en MLflow
+
+El [notebook de backtest](notebooks/backtest_mlflow.ipynb) y la [guía MLflow](MLFLOW.es.md)
+añaden un flujo editable alrededor del evaluador existente. **MLflow registra experimentos;
+no entrena un modelo nuevo de machine learning.** Cada candidato ejecuta el mismo motor de
+relleno con otra configuración permitida. Las actualizaciones del basis histórico y de las
+correlaciones siguen siendo las del algoritmo cronológico existente, no una etapa nueva de MLflow.
+
+El comando CLI `tune` de la sección 15 conserva sus **seis** controles del grid. El notebook/API
+de experimentos admite **29** controles del modelo: esos seis, activación local/arbitrage,
+peso de otra familia, memoria y umbral histórico, memoria/evidencia de correlación y cross,
+los cinco controles del fallback EEX y los siete de shape. La guía enumera sus nombres planos
+Python, tipos y límites exactos. Por ejemplo:
+
+```python
+PARAMETER_GRID = {
+    "basis_mode": ["auto", "ratio", "additive"],
+    "layer_hist": ["off", "auto"],
+}
+```
+
+Esto crea **3 × 2 = 6** candidatos. Las listas forman un producto cartesiano limitado por
+`MAX_TRIALS` (24 en el notebook). Lo omitido queda fijo. Se excluyen del grid rutas,
+mapping/identidad, targets, convenciones, filtros de volumen/extremos, protecciones del ratio,
+antigüedad EEX y fechas de evaluación para conservar un universo común de observaciones.
+Admitir un parámetro no significa que convenga optimizarlo ni que tenga efecto en todos los casos.
+
+La evaluación conserva sus reglas: ocultar un periodo físico propio y todos sus alias;
+priorizar cobertura máxima en calibración y después minimizar el promedio por curva de
+`MAE_model / MAE_EEX` sobre casos predichos por **todos** los candidatos. La verdad es el VWAP
+propio ocultado, no EEX. Los errores absolutos se separan por unidad. Se reservan las fechas
+elegibles recientes y se evalúa **solo al ganador de calibración**, manteniendo sus parámetros.
+Los originales de fechas anteriores pueden seguir actualizando el histórico para las fechas
+posteriores. El ejemplo del notebook reserva cinco fechas; el CLI mantiene veinte por defecto.
+
+El registro crea una ejecución padre y sus hijas candidatas, guardando configuración, grid,
+fechas, huellas de datos, procedencia del código e informes. `LOG_PREDICTIONS=False` omite los
+archivos individuales de predicciones, pero conserva agregados y metadatos. El servicio local
+escucha en `127.0.0.1`. La configuración elegida es una propuesta: no cambia automáticamente
+el config ni publica curvas de producción. MLflow es opcional: el relleno habitual y el
+evaluador CLI no requieren ese servicio ni su grupo de dependencias.
+
+La demo sintética funciona sin input/EEX real y demuestra la ejecución, no la optimalidad
+con datos de mercado. Un grid de fallback puede empatar porque local/histórico resuelva todos
+los propios ocultados y nunca entre esa rama. El ejemplo `fallback_isolated` apaga expresamente
+local/histórico/cross para comparar esa rama de forma controlada. Asimismo, shape en audit y
+su tolerancia diagnóstica no modifican precios. Antes de generalizar a desconocidos reales,
+evalúa bloques de huecos apropiados y fechas posteriores intactas; registrar experimentos no
+elimina esos límites de validación.

@@ -6,6 +6,11 @@ The notebook reads **one filled output CSV only**, usually `filled_history.csv`.
 load original VWAP files, mapping files or raw EEX files, run the filler, adjust prices, or
 write data. Interactive Plotly charts and selectors are available in three separate tabs.
 
+To **run and track parameter experiments**, use the separate
+[backtest + MLflow notebook](notebooks/backtest_mlflow.ipynb) and [its guide](MLFLOW.md).
+That notebook loads inputs and writes experiment reports; this page describes only the
+saved-curve viewer above.
+
 ## Start on this or another computer
 
 Copy the repository and the output CSV you want to inspect. Python 3.11 or later is required.

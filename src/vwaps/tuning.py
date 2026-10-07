@@ -9,6 +9,8 @@ never writes files or changes the caller's configuration or observations.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date
 from itertools import product
@@ -16,7 +18,7 @@ from itertools import product
 import numpy as np
 import pandas as pd
 
-from vwaps.config import Config
+from vwaps.config import Config, validate_config
 from vwaps.fill import CurveFiller
 from vwaps.hours import hours_fn
 from vwaps.identity import CurveKey, IDENTITY_COLUMNS, curve_keys, normalize_identity
@@ -28,6 +30,15 @@ from vwaps.tenors import resolve_tenor
 
 TUNABLE_FIELDS = (
     "basis_mode", "tau_log", "shrink_k", "layer_hist", "layer_correlation", "layer_cross",
+)
+EXPERIMENT_TUNABLE_FIELDS = (*TUNABLE_FIELDS,
+    "layer_local", "layer_arbitrage", "other_kind_weight",
+    "ewma_halflife_days", "hist_max_age_days", "hist_auto_min_obs",
+    "corr_halflife_days", "corr_prior_obs", "cross_min_corr", "cross_min_obs", "cross_halflife_days",
+    "fallback_price_method", "fallback_price_window", "fallback_ewma_halflife",
+    "fallback_spread_window", "fallback_anchor_months", "shape_mode", "shape_adjust_originals",
+    "shape_smoothness_weight", "shape_coherence_weight", "shape_max_abs_adjustment",
+    "shape_original_weight", "shape_coherence_tolerance",
 )
 PAIR_KEYS = ["reference_date", *IDENTITY_COLUMNS, "tenor"]
 
@@ -52,10 +63,14 @@ def _validate_value(field: str, value) -> None:
             raise ValueError(f"Tuning {field} values must be finite positive numbers")
 
 
-def _candidates(cfg: Config, grid: dict[str, list], max_trials: int) -> list[dict]:
+def _candidates(cfg: Config, grid: dict[str, list], max_trials: int, *, extended_grid: bool = False) -> list[dict]:
     if isinstance(max_trials, bool) or not isinstance(max_trials, int) or max_trials < 1:
         raise ValueError("max_trials must be a positive integer")
-    unknown = set(grid) - set(TUNABLE_FIELDS)
+    if not isinstance(extended_grid, bool):
+        raise ValueError("extended_grid must be a boolean")
+    if not isinstance(grid, dict):
+        raise ValueError("parameter_grid must be a dictionary of parameter lists")
+    unknown = set(grid) - set(EXPERIMENT_TUNABLE_FIELDS if extended_grid else TUNABLE_FIELDS)
     if unknown:
         raise ValueError(f"Unsupported tuning parameters: {sorted(unknown)}")
     for field, values in grid.items():
@@ -70,7 +85,10 @@ def _candidates(cfg: Config, grid: dict[str, list], max_trials: int) -> list[dic
     for field, value in base.items():
         _validate_value(field, value)
     names = list(grid)
-    return [{**base, **dict(zip(names, values))} for values in product(*(grid[name] for name in names))]
+    candidates = [{**base, **dict(zip(names, values))} for values in product(*(grid[name] for name in names))]
+    for candidate in candidates:
+        validate_config(replace(cfg, **candidate))
+    return candidates
 
 
 def _observation_dates(cfg: Config, vw: pd.DataFrame, maps: list[ProductMap], start: date, end: date) -> list[date]:
@@ -208,6 +226,8 @@ def _report(paired: pd.DataFrame, available: pd.DataFrame, trial_id: int,
 def tune_parameters(
     cfg: Config, vw: pd.DataFrame, maps: list[ProductMap], books: dict[CurveKey, EexBook | None],
     start: date, end: date, parameter_grid: dict[str, list], validation_days: int, max_trials: int,
+    *, observer: Callable[[str, dict], None] | None = None,
+    extended_grid: bool = False,
 ) -> TuneResult:
     """Choose on calibration dates only, then evaluate just the winner later.
 
@@ -219,19 +239,34 @@ def tune_parameters(
     Earlier original observations remain available for normal chronological
     warmup. As each holdout day passes, its originals can inform later days;
     the selected parameters never change using holdout results.
+
+    An optional observer receives copied event payloads for external tracking.
+    Calibration scores are emitted only after the common comparison sample is
+    final. Observer failures propagate; they never silently alter selection or
+    produce an apparently complete tracked experiment.
+    ``extended_grid=True`` additionally admits the explicitly listed safe
+    experiment controls. Observation filters, identities, calendars, targets
+    and staleness limits remain fixed, and every trial must retain the same
+    EEX/held-out observation universe. The existing CLI uses the six-field grid.
     """
+    def notify(event: str, **payload) -> None:
+        if observer is not None:
+            observer(event, deepcopy(payload))
+
     if start > end:
         raise ValueError("The tuning start date must be on or before the end date")
     if cfg.warmup_days != 0:
         raise ValueError("Tuning requires run.warmup_days = 0 to replay all supplied original history")
     if isinstance(validation_days, bool) or not isinstance(validation_days, int) or validation_days < 1:
         raise ValueError("validation_days must be a positive integer")
-    candidates = _candidates(cfg, parameter_grid, max_trials)
+    candidates = _candidates(cfg, parameter_grid, max_trials, extended_grid=extended_grid)
     dates = _observation_dates(cfg, vw, maps, start, end)
     if len(dates) < validation_days + 2:
         raise ValueError("Tuning needs at least two calibration observation dates plus the requested validation_days")
     calibration_dates, holdout_dates = dates[:-validation_days], dates[-validation_days:]
     _check_holdout_coverage(cfg, vw, maps, books, holdout_dates)
+    notify("started", candidates=candidates, calibration_dates=calibration_dates,
+           validation_dates=holdout_dates)
     calibration_results = []
     baseline = None
     common_mask = None
@@ -247,7 +282,9 @@ def tune_parameters(
         return _paired(result.loo, days, label)
 
     for trial_id, parameters in enumerate(candidates, 1):
+        notify("trial_started", trial_id=trial_id, parameters=parameters)
         available = evaluate(parameters, calibration_dates, f"Calibration trial {trial_id}")
+        notify("calibration_evaluated", trial_id=trial_id, parameters=parameters, available=available)
         evidence = available[[*PAIR_KEYS, "own", "eex_pred"]].set_index(PAIR_KEYS).sort_index()
         if baseline is None:
             baseline = evidence
@@ -273,12 +310,25 @@ def tune_parameters(
             best_score, selected_trial, selected = score, trial_id, parameters.copy()
         calibration_reports.append(report)
 
+    calibration_report = pd.concat(calibration_reports, ignore_index=True)
+    calibration_report["selected"] = calibration_report["trial_id"].eq(selected_trial)
+    if observer is not None:
+        for trial_id, (parameters, available) in enumerate(zip(candidates, calibration_results), 1):
+            notify("calibration_scored", trial_id=trial_id, parameters=parameters,
+                   report=calibration_report[calibration_report["trial_id"].eq(trial_id)],
+                   available=available.assign(accuracy_included=common_mask),
+                   selected=trial_id == selected_trial)
+    notify("calibration_complete", selected_trial_id=selected_trial,
+           selected_config=selected, report=calibration_report)
+    notify("validation_started", trial_id=selected_trial, parameters=selected)
     validation_available = evaluate(selected, holdout_dates, f"Validation of trial {selected_trial}")
     validation = validation_available[validation_available["model_pred"].notna()]
     validation_report = _report(validation, validation_available, selected_trial, selected, holdout_dates)
     validation_report["selected"] = True
-    calibration_report = pd.concat(calibration_reports, ignore_index=True)
-    calibration_report["selected"] = calibration_report["trial_id"].eq(selected_trial)
+    if observer is not None:
+        notify("validation_scored", trial_id=selected_trial, parameters=selected,
+               report=validation_report,
+               available=validation_available.assign(accuracy_included=validation_available["model_pred"].notna()))
     metadata = {
         "objective": "mean_per_curve_mae_model_over_mae_eex",
         "evaluated_method": "pipeline_configured", "baseline": "eex",

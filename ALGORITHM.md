@@ -2073,7 +2073,7 @@ calibration dates with actual paired comparisons. The example tests 18 combinati
 | `--validation-days` | `20` | Positive number of latest distinct eligible observation dates reserved; not consecutive calendar days |
 | `--max-trials` | `50` | Positive Cartesian-product limit; an oversized grid is rejected rather than truncated |
 
-Only **those six model settings** are explored. Other controls retain their configured values.
+The CLI explores **those six model settings**. Other controls retain their configured values.
 Defaults test three modes while keeping the other five fields fixed. Changing settings such
 as expiry or volume requires another explicit comparison; tune does not automatically search
 the entire configuration inventory.
@@ -2264,7 +2264,7 @@ Override them for one `daily`, `refill`, `catchup`, `backtest` or `tune` executi
 | `--eex-anchor-months N` | `anchor_months` |
 
 Example: `python run.py daily --eex-price-method simple --eex-price-window 5`.
-Omitted options use TOML; the file is not modified. In tune these values remain fixed across
+Omitted options use TOML; the file is not modified. In CLI tune these values remain fixed across
 all candidates: they do not add dimensions to the six-control search grid.
 
 ### Result, audit and updating earlier outputs
@@ -2459,7 +2459,7 @@ cannot establish adequate coverage.
 
 `pipeline_configured` in backtest includes shape after the held-out period and its aliases
 have been hidden. History continues to learn only actual originals after prediction.
-Tune still searches the same six existing refill dimensions; shape settings stay fixed
+CLI tune still searches the same six refill dimensions; shape settings stay fixed
 through its grid and are retained in the configuration snapshot. Comparing shape settings
 requires separate controlled runs with the same evaluation cases.
 
@@ -2527,3 +2527,53 @@ These rules are part of the implemented algorithm and execution contract:
 The repair changes affected edge-case outputs, so regenerate a separate result folder before
 comparing an older run. It does not validate the model on unavailable real own data or select
 better local-anchor families; see [anchor research](ANCHORS.md).
+
+## 19. Parameter experiments and optional MLflow tracking
+
+The [backtest notebook](notebooks/backtest_mlflow.ipynb) and [MLflow guide](MLFLOW.md) add an
+editable experiment workflow around the existing evaluator. **MLflow records experiments;
+it does not train a new machine-learning model.** Each candidate runs the same refill engine
+with a different permitted configuration. Historical basis/correlation updates remain the
+existing chronological algorithm, not a new MLflow learning stage.
+
+The command-line `tune` interface described in section 15 retains its **six** grid controls.
+The experiment API/notebook accepts **29** model controls: those six plus local/arbitrage
+switches, other-kind weight, own-history memory and eligibility threshold, correlation/cross
+memory and evidence controls, the five EEX fallback controls and seven shape controls.
+The guide lists their exact flat Python names, types and limits. For example:
+
+```python
+PARAMETER_GRID = {
+    "basis_mode": ["auto", "ratio", "additive"],
+    "layer_hist": ["off", "auto"],
+}
+```
+
+This creates **3 × 2 = 6** candidates. Lists form a Cartesian product, bounded by
+`MAX_TRIALS` (24 in the notebook). Omitted fields stay fixed. Paths, mapping/identity, targets,
+conventions, volume/outlier filters, ratio guards, EEX staleness and evaluation dates are
+excluded from the grid so candidates retain a common observation universe. Grid support
+does not mean every parameter is worth optimizing or has an effect in every case.
+
+The evaluation contract is unchanged: hide one physical own period and all its aliases;
+maximize calibration coverage first; then minimize the equal-curve mean of
+`MAE_model / MAE_EEX` on predictions common to **all** calibration candidates. The truth is
+the hidden own VWAP, not EEX. Absolute errors remain separated by unit. Recent eligible dates
+are held out, and **only the calibration winner** is evaluated there with fixed parameters.
+Earlier observed originals can still update the history used for later dates. The notebook
+example reserves five dates; the CLI default remains twenty.
+
+Tracking creates one parent run and candidate children, with configuration, grid, date split,
+data fingerprints, code provenance and reports. Optional individual prediction files are
+omitted with `LOG_PREDICTIONS=False`; aggregate reports and audit metadata remain. The local
+service listens on `127.0.0.1`. The selected configuration is a proposal: no automatic config
+change or publication of production curves occurs. MLflow is optional; ordinary filling and
+the CLI evaluator do not require this service or dependency group.
+
+The default synthetic demo runs without real input/EEX files and demonstrates execution, not
+real-market optimality. A fallback grid can tie because local/history already fills every
+hidden point, so the fallback branch is never exercised. The `fallback_isolated` example
+explicitly disables local/history/cross for a controlled comparison of that branch. Likewise,
+shape audit and its diagnostic coherence tolerance do not change predictions. Use appropriate
+missing-block experiments and untouched later dates before extending conclusions to actual
+unknown prices; tracking does not remove those model-validation limits.

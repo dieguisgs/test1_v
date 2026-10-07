@@ -6,6 +6,12 @@ This guide distinguishes **implemented evaluation** from **proposed experiments*
 below are not pricing features. The optional shape layer in the final section is implemented and off by default. A reasonable-looking curve is a hypothesis to test, not
 evidence that its missing prices are accurate.
 
+The [MLflow notebook and guide](MLFLOW.md) provide editable candidate lists, local experiment
+tracking, a synthetic demo and an expanded model grid. In this guide, `tune` refers to the
+command-line interface with its original six grid fields unless stated otherwise. Both use
+the same coverage-first objective and chronological winner-only validation. The notebook
+example reserves five dates; the CLI default remains twenty.
+
 ## 1. A curve can look plausible and still need explanation
 
 In the synthetic M+1/Q+2 example, EEX January, February and March all equal **150**. Additive
@@ -44,7 +50,7 @@ Errors target the **hidden own VWAP**, not EEX. EEX is an input and benchmark. E
 `pipeline_configured`: `local_*`, `hist_*` and `blend_*` are component diagnostics that need
 not reproduce production settings or its complete fallback behavior.
 
-Tune supports exactly six fields: `basis_mode`, `tau_log`, `shrink_k`, `layer_hist`,
+The CLI tune command supports six fields: `basis_mode`, `tau_log`, `shrink_k`, `layer_hist`,
 `layer_correlation`, `layer_cross`. It selects **one global configuration**, not separate
 parameters per curve. Other parameters remain fixed. The Cartesian grid is bounded by
 `--max-trials` (default 50).
@@ -85,7 +91,7 @@ a block of months or every own observation that day.
 Evaluated originals need EEX and must pass common filters such as `min_volume` and
 `max_anchor_dev`. Tune coverage therefore concerns **EEX-evaluable observations**, not all
 requested gaps. Do not improve reported accuracy by filtering away difficult cases. Comparing
-filters requires an independently fixed evaluation universe; today's six-field grid does not
+filters requires an independently fixed evaluation universe; neither the CLI nor the expanded notebook grid
 vary those filters.
 
 ## 5. Proposed protocol: complete truth, realistic missingness
@@ -125,8 +131,10 @@ are proposals, not fields already provided by the standard reports.
 
 ## 7. Parameter families: what to compare deliberately
 
-Only the six fields listed above are currently grid-tunable. Other settings stay fixed during
-that grid; this table is an experiment map, not an instruction to optimize every setting.
+The CLI grid varies the six fields listed above. The [experiment notebook](MLFLOW.md) also
+supports model-memory, fallback and shape fields, using flat Python names listed in that guide.
+Omitted and unsupported fields stay fixed. This table is an experiment map, not an instruction
+to optimize every setting or vary observation filters inside a shared ranking.
 
 | Family | Relevant controls |
 |---|---|
@@ -315,9 +323,9 @@ A number of years alone does not establish sufficient overlap or coverage.
 
 `pipeline_configured` now evaluates shape after hiding the observed period and all its aliases;
 the hidden truth cannot act as an original shape constraint. History and cross still learn
-from actual originals only. Tune keeps its six existing search dimensions; shape settings
-remain fixed throughout the grid and are saved with the configuration. Compare shape
-settings in separate matched runs, including errors, large errors, coverage, aggregate
+from actual originals only. The CLI keeps its six search dimensions and fixed shape settings;
+the [experiment notebook](MLFLOW.md) can explicitly include shape settings in its grid.
+Compare shape settings on matched observations, including errors, large errors, coverage, aggregate
 residuals, modification sizes and original movements. Block masking and repeated-origin
 validation remain proposed protocols, not new features of this layer.
 

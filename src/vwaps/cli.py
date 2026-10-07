@@ -17,7 +17,7 @@ from vwaps.config import Config, load_config, validate_fallback_config, validate
 from vwaps.dates import parse_reference_dates
 from vwaps.enrich import enrich_input
 from vwaps.fill import CurveFiller
-from vwaps.io_eex import EexBook
+from vwaps.io_eex import EexBook, load_eex_books
 from vwaps.io_vwap import load_input
 from vwaps.identity import CurveKey, IDENTITY_COLUMNS, curve_keys, normalize_identity
 from vwaps.log import get_logger, setup_logging
@@ -165,31 +165,7 @@ def _source_order(sources) -> list[str]:
 
 
 def _books(cfg: Config, maps: list[ProductMap]) -> dict[CurveKey, EexBook | None]:
-    books: dict[CurveKey, EexBook | None] = {}
-    cache: dict[Path, EexBook | None] = {}
-    for m in maps:
-        if not m.active:
-            continue
-        path = eex_path(cfg, m)
-        if path is None:
-            get_logger().warning(f"{m.label}: no EEX mapping -> own VWAPs "
-                                 f"(contract reconstruction enabled: {cfg.layer_arbitrage})")
-            books[m.key] = None
-            continue
-        if path in cache:
-            books[m.key] = cache[path]
-            continue
-        try:
-            books[m.key] = EexBook.from_file(path)
-        except FileNotFoundError:
-            get_logger().error(f"{m.product}: EEX file {path} does not exist -> no EEX "
-                               f"(check eex_file in {cfg.mapping_file.name})")
-            books[m.key] = None
-        except Exception as exc:
-            raise ValueError(f"{m.label}: cannot read EEX file {path}: {exc}. "
-                             "No result files written; repair the input and retry.") from exc
-        cache[path] = books[m.key]
-    return books
+    return load_eex_books(cfg, maps)
 
 
 def _load(cfg: Config, override: str | None):

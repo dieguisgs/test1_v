@@ -6,6 +6,11 @@ El notebook lee **solo un CSV de curvas ya generado**, normalmente `filled_histo
 No carga propios originales, mapping ni archivos EEX, no ejecuta el relleno, no ajusta
 precios y no escribe datos. Incluye gráficos Plotly y selectores en tres pestañas separadas.
 
+Para **ejecutar y registrar experimentos de parámetros**, utiliza el otro
+[notebook de backtest + MLflow](notebooks/backtest_mlflow.ipynb) y [su guía](MLFLOW.es.md).
+Ese notebook carga inputs y guarda informes de experimentos; esta página describe únicamente
+el visor de curvas ya guardadas.
+
 ## Arrancar en este u otro ordenador
 
 Copia el repositorio y el CSV que quieras consultar. Se necesita Python 3.11 o posterior.

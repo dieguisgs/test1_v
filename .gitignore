@@ -28,5 +28,9 @@ htmlcov/
 .agents/
 *.log
 *.tmp
+# Optional experiment tracking (the notebook uses output/mlflow by default).
+/mlruns/
+/mlartifacts/
+/mlflow.db*
 Thumbs.db
 .DS_Store

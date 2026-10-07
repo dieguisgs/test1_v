@@ -1,0 +1,290 @@
+# Compare backtests in a notebook with MLflow
+
+[Español](MLFLOW.es.md) · [Notebook](notebooks/backtest_mlflow.ipynb) · [Backtest method](BACKTEST.md) · [README](README.md)
+
+This notebook runs the existing parameter tuner and records experiments in a local MLflow
+service. Start with the synthetic example, then use the same notebook on the computer that
+has your own VWAP and EEX files. MLflow organizes the evidence; the tuner decides which
+combination wins. It does not add a new refill method or change the selection objective.
+
+The separate [curve viewer](NOTEBOOK.md) displays saved curves. This experiment notebook
+loads data, executes backtests and writes experiment reports under `output/mlflow`.
+
+## 1. Install and open
+
+From the repository root, with Python 3.11 or later:
+
+```powershell
+uv sync --group notebook --group experiment
+uv run --group notebook --group experiment jupyter lab notebooks/backtest_mlflow.ipynb
+```
+
+In VS Code, open the repository folder, open the notebook and select the local `.venv`
+kernel. On Windows its interpreter is `.venv\Scripts\python.exe`. If it is not listed:
+
+```powershell
+uv run --group notebook --group experiment python -m ipykernel install --user --name vwaps --display-name "Python (VWAPS .venv)"
+```
+
+Restart the kernel after installing dependencies. Without uv, install the project dependencies
+and the optional tools into the same environment as the notebook kernel:
+
+```powershell
+python -m pip install "numpy>=1.26" "pandas>=2.2" "openpyxl>=3.1" "jupyterlab>=4" "ipywidgets>=8" "plotly>=5" "mlflow>=3.5,<4" "psutil>=6"
+python -m jupyter lab notebooks/backtest_mlflow.ipynb
+```
+
+Run the cells in order. The default demo generates its own observations, mapping and EEX
+history in memory. It needs `config.toml` for the base configuration, but does not read its
+real input, mapping or EEX files. Its overrides apply to a separate configuration object.
+The demo invents two curves: one with an additive own/EEX relationship, another with a
+proportional relationship, both with noise and changing adjustments. That construction
+deliberately favors those model families; it is not a neutral market benchmark.
+
+## 2. The controls you edit
+
+| Notebook control | Meaning |
+| --- | --- |
+| `PROJECT_ROOT` | `None` finds the project from the current directory or its parents. Set an absolute repository path if needed. |
+| `CONFIG_PATH` | `None` uses `config.toml`; a relative path is relative to the project root. |
+| `DATA_MODE` | `"synthetic"` by default; change to `"real"` on the computer with your files. |
+| `VWAP_PATH` | Optional real input override. `None` uses the input configured in the TOML. A relative override is relative to the project root. |
+| `START_DATE`, `END_DATE` | ISO dates such as `"2026-09-01"`, inclusive. `None` uses the dataset's date bounds. |
+| `VALIDATION_DAYS` | Number of latest eligible observation dates reserved for validation; the notebook example uses **5**. These are observation dates, not a five-calendar-day duration. |
+| `MAX_TRIALS` | Maximum Cartesian grid size; the example uses **24**. A larger grid fails before starting the run. |
+| `DEMO_SEED`, `DEMO_PERIODS` | Reproducible synthetic generation; default seed 7 and 30 periods. They do not affect real mode. |
+| `MLFLOW_PORT` | Local service port, initially **5000**. |
+| `MLFLOW_STORAGE` | Local experiment storage, initially `output/mlflow`, relative to the project root. |
+| `EXPERIMENT_NAME` | Groups related MLflow runs. Keep the same name to compare reruns. |
+| `LOG_PREDICTIONS` | Whether to save detailed backtest prediction artifacts. These may contain own prices when using real data. |
+| `PARAMETER_GRID` | Explicit lists of candidate parameter values, described below. |
+| `STOP_SERVER` | Final cell: `False` leaves the UI running. Set `True` and execute that cell to stop the managed service. |
+
+`run.warmup_days` must be **0** for tuning, so the replay can use all supplied earlier own
+history. In real mode the notebook preserves your configuration and rejects a nonzero value;
+it does not silently rewrite it. Earlier history can precede `START_DATE`: the date range
+controls evaluation dates, not an instruction to discard the available historical input.
+
+## 3. Which parameters can be compared?
+
+The default is six combinations:
+
+```python
+PARAMETER_GRID = {
+    "basis_mode": ["auto", "ratio", "additive"],
+    "layer_hist": ["off", "auto"],
+}
+```
+
+The Cartesian product tries each basis mode with each history setting: **3 × 2 = 6**.
+It does not mean six unrelated grids. Omitted parameters retain their dataset configuration
+values. The notebook prints the size before running.
+
+The experiment notebook accepts the following **flat Python field names**. They differ from
+some TOML names: for example `fallback_price_window` corresponds to
+`[eex_fallback].price_window`. The default command-line `tune` interface continues to expose
+its original six fields; this expanded grid belongs to the experiment API/notebook.
+
+| Grid field | Accepted values | What changes |
+| --- | --- | --- |
+| `basis_mode` | `"auto"`, `"ratio"`, `"additive"` | How own prices are expressed relative to EEX. |
+| `tau_log` | Positive finite numbers | How quickly an anchor's weight decays with logarithmic delivery distance. |
+| `shrink_k` | Positive finite numbers | How strongly local evidence is pulled toward its permitted prior when evidence is weak. |
+| `layer_hist` | `"off"`, `"auto"`, `"on"` | Whether/how the existing history layer is enabled; usable prior observations are still required. |
+| `layer_correlation` | `False`, `True` | The existing learned own-basis correlation weighting. It does not search for a best EEX-only anchor. |
+| `layer_cross` | `False`, `True` | The existing cross-curve prior, subject to its eligibility and evidence requirements. |
+| `layer_local`, `layer_arbitrage` | `False`, `True` | Enable the existing local or arbitrage layers. |
+| `other_kind_weight` | Finite numbers >= 0 | Prior weight for an anchor of another contract family. Zero is a weight choice, not a general family-eligibility policy. |
+| `ewma_halflife_days` | Positive finite numbers | Historical own-basis half-life (`method.ewma_halflife_days`). |
+| `hist_max_age_days` | Integers >= 1 | Expiry since the latest usable own historical observation. |
+| `hist_auto_min_obs` | Finite numbers >= 0 | Effective evidence threshold for historical auto selection. |
+| `corr_halflife_days`, `corr_prior_obs` | Positive half-life; nonnegative prior, both finite | Correlation decay and prior strength (`correlation.halflife_days`, `correlation.prior_obs`). |
+| `cross_min_corr` | Finite numbers from -1 to 1 | Minimum usable cross-curve correlation. |
+| `cross_min_obs`, `cross_halflife_days` | Nonnegative evidence; positive half-life, both finite | Cross-curve evidence threshold and decay. |
+| `fallback_price_method` | `"simple"`, `"ewma"` | Equal or exponential weights within the fallback price window. |
+| `fallback_price_window`, `fallback_spread_window` | Integers >= 2 | Number of EEX publication dates for price averaging and spread averaging. |
+| `fallback_ewma_halflife` | Positive finite numbers | Exponential half-life inside the fallback price window. |
+| `fallback_anchor_months` | Integers >= 1 | Initial monthly maturities averaged directly before propagating spreads. |
+| `shape_mode` | `"off"`, `"audit"`, `"adjust"` | Disable, propose, or apply the existing optional shape layer. |
+| `shape_adjust_originals` | `False`, `True` | Explicitly allow the shape layer to move final prices derived from own observations. |
+| `shape_smoothness_weight`, `shape_coherence_weight` | Finite numbers >= 0 | Soft penalties for irregular basis and month/aggregate inconsistency. |
+| `shape_max_abs_adjustment` | Positive finite numbers | Maximum shape change in price units. |
+| `shape_original_weight` | Finite numbers >= 1 | Fidelity to original values when modifying them is permitted. |
+| `shape_coherence_tolerance` | Finite numbers >= 0 | Diagnostic tolerance; changing it alone does not alter the objective or prices. |
+
+`GRID_EXAMPLES` offers small named alternatives for basis only, basis plus history, distance
+plus shrinkage, local reach, historical memory, fallback averaging, shape and optional learned
+layers. To select one, replace the `PARAMETER_GRID`
+assignment with `deepcopy(GRID_EXAMPLES["distance_and_shrinkage"])`, for example. The
+example values are candidates to investigate, not recommendations established with real data.
+`fallback_isolated` additionally disables local/history/cross to exercise fallback explicitly;
+it is a controlled branch comparison, not a comparison of the full production setup.
+
+Every omitted field remains fixed. Paths, mapping/identity, targets, delivery conventions,
+volume/outlier filters, ratio safety guards, EEX staleness and evaluation dates cannot be
+grid fields. Changing those could change which observations are being compared. An unsupported
+key is an error. To study such a change, design a separate evaluation with an explicitly
+comparable truth universe; do not treat unlike sample sets as the same competition.
+
+Small focused grids are easier to interpret than multiplying every list together. For
+example, fallback settings may tie because leave-one-out still has other own anchors and
+never activates fallback. Such a tie is **no evidence about which fallback is better**.
+Similarly, `shape_mode="audit"` does not change predictions, and the coherence tolerance
+is diagnostic. To assess actual fallback holes or missing blocks, add a suitable masking
+experiment; the notebook does not manufacture that evidence automatically.
+
+## 4. How the winner is chosen
+
+Think of a teacher covering a known own price, asking the refill to recover it, and then
+comparing its answer with the covered price. Other own prices available at that date remain
+visible. Equivalent labels for the same physical delivery period are hidden together, so
+an alias cannot reveal the answer. This is leave-one-period-out evaluation, not a simulation
+of every missing block that could occur in production.
+
+The tuner splits dates chronologically. Earlier dates are **calibration**; the latest
+`VALIDATION_DAYS` eligible own-observation dates are **validation**. It tries all combinations
+on calibration, selects one, and evaluates **only that winner** on validation. Parameters
+stay fixed during validation, while own observations from earlier validation dates can
+become available history for later dates, as in a daily chronological replay.
+
+Selection follows this order:
+
+1. Prefer combinations with maximum calibration prediction coverage over the common EEX
+   benchmark universe. A method does not win by abstaining on difficult cases.
+2. Among those combinations, prefer the lowest accuracy score on cases predicted by **all**
+   calibration candidates. For each curve `(product, region, unit)`, calculate
+   `MAE_model / MAE_EEX`; then average those ratios with equal weight per curve.
+3. Break an exact tie by the order of combinations in the grid.
+
+Lower `score` is better. A score below 1 improves on the EEX benchmark under this equal-curve
+measure; a score above 1 is worse. This is **not** a percentage price error. If EEX's MAE is
+zero for a curve, the ratio is 1 when the model is also exact, otherwise infinity.
+`normalized_skill = 1 - score`. A synthetic example can contain ties and does not establish
+the best real parameters.
+
+The hidden **own VWAP is the truth**, not EEX. EEX is a reference and benchmark. Absolute
+MAE, RMSE and bias are shown separately by unit; the overall row leaves these absolute-error
+fields blank to avoid mixing currencies or units. Always inspect coverage, sample size,
+dates and per-unit results alongside the score. The paired accuracy sample can be smaller
+than a candidate's available predictions. Data lacking enough paired dates cannot support
+this comparison and produces an error instead of a fabricated ranking.
+
+Repeatedly changing the grid after reading the same validation result turns that validation
+set into part of your research. Reserve later untouched dates, or run a separate rolling
+evaluation, before claiming real generalization. See [BACKTEST.md](BACKTEST.md) for the
+limits of masking observed prices when actual missing prices may have different liquidity.
+
+## 5. What appears in MLflow and the notebook
+
+The notebook starts the managed service on **`127.0.0.1`** and displays its clickable URL.
+It runs the tuner, links to the resulting MLflow run, displays the sorted calibration table,
+shows the proposed parameter configuration, and then shows the winner's validation table.
+Use MLflow to compare parameters, metrics and saved artifacts across runs. Use the notebook's
+`eligible_for_selection` and `selected` fields to understand selection; sorting only by an
+accuracy metric in the MLflow UI does not reproduce coverage-first selection.
+
+Tracking storage and run reports are under `MLFLOW_STORAGE`. Each notebook run gets a fresh
+report directory. Saved reports and configuration metadata let you examine what was tried;
+the selected parameters are a **proposal**, never automatically applied to `config.toml`.
+The notebook does not regenerate or overwrite production curve outputs.
+
+The parent MLflow run groups candidate child runs. Calibration metrics are recorded per
+candidate; validation metrics are recorded only for the selected candidate and the parent.
+Artifacts include calibration/validation CSV reports, grid and configuration snapshots,
+data fingerprints and code/environment provenance. Optional prediction files help audit
+individual errors. Fingerprints identify supplied data; they are not a copy of the input
+dataset or a substitute for preserving the actual data needed to reproduce a real run.
+`LOG_PREDICTIONS=False` omits individual paired price/prediction artifacts; aggregate reports
+and configuration/provenance metadata are still saved.
+
+This workflow uses a local service and local artifacts; it does not require an MLflow cloud
+account. Real-data artifacts can contain own prices and identifying labels. They remain in
+the chosen storage directory unless you explicitly copy/share it or change the workflow.
+No ZIP is generated or uploaded. Stopping the service keeps its stored experiment history.
+For the underlying tool, see the official [tracking server documentation](https://mlflow.org/docs/latest/self-hosting/architecture/tracking-server/)
+and [MLflow Tracking guide](https://mlflow.org/docs/latest/ml/tracking/).
+
+### Read one experiment in the UI
+
+1. Open the notebook's MLflow link, then the experiment's run list. Find the parent run and
+   show its child runs, named `calibration-001`, `calibration-002`, and so on. Compare those
+   children with each other; the parent summarizes the selected candidate, not another trial.
+2. Add the parameters you varied and the metrics **`calibration.overall.coverage`** and
+   **`calibration.overall.score`** to the run table. First retain the highest coverage; among
+   those rows, the lowest score wins. The child tag **`vwaps.selected` = `true`** identifies
+   the actual winner. For an exact tie, check `trial_id` and the grid order in the report.
+3. Select child runs to compare their parameter and metric values. Inspect
+   `calibration.overall.n_paired` and `calibration.overall.n_missing` as well as the score.
+   **`validation.*` metrics appear only for the selected child and the parent**: absent
+   validation metrics on other children mean they were not evaluated on the holdout.
+   A parent's validation result must not be counted as a second independent trial.
+4. Open the run's artifacts. **`reports/`** contains CSV summaries; the parent's
+   `reports/calibration_report.csv` contains the full grid. **`audit/`** holds JSON records
+   such as configuration, grid, split, selected parameters, fingerprints and provenance,
+   depending on whether you opened the parent or a child. **`predictions/`** on child runs
+   holds individual paired observations/predictions when enabled. With
+   `LOG_PREDICTIONS=False`, those prediction files are not generated; reports and audit
+   metadata remain. The child tag `vwaps.predictions` records `enabled` or `disabled`.
+5. Read the selected child's validation coverage and score, then its per-unit errors. Unit
+   metric names use a sanitized label plus a hash; `audit/*_metric_states.json` maps them
+   back to the original unit. That file also records nonfinite metrics omitted from MLflow's
+   numeric charts. An absent/infinite score is not a score of zero; inspect the CSV/JSON.
+
+The notebook's sorted table remains the direct presentation of the selection policy. MLflow
+is useful for inspecting and comparing runs, but a UI sort does not itself select parameters.
+
+## 6. Move to the computer with real data
+
+Copy or clone the source repository and install the two optional groups there. Configure
+your real input, reviewed mapping and EEX folder in `config.toml`, as explained in the
+[README](README.md). Then edit the notebook:
+
+```python
+DATA_MODE = "real"
+VWAP_PATH = r"C:\Data\VWAPS\observations.xlsx"  # Or None to use config.toml.
+START_DATE = "2026-08-10"
+END_DATE = "2026-10-06"
+VALIDATION_DAYS = 5
+EXPERIMENT_NAME = "vwaps-real-first-review"
+```
+
+Those paths and dates are examples, not supplied files or a required historical period.
+Real mode loads normalized own observations plus the configured mapping/EEX books. Only
+mapped active fill curves participate. Choose dates with enough eligible own observations
+and EEX reference coverage; merely having calendar dates in the range is insufficient.
+Keep enough earlier history for the methods you want to compare.
+
+## 7. Troubleshooting
+
+- **Import error:** install both groups in the notebook's actual kernel, then restart it.
+  The terminal's Python and the notebook's Python may differ; the setup cell prints the latter.
+- **Port already in use:** reexecuting the startup cell in the same kernel can reuse its managed service.
+  An unrelated process on the port is rejected. Choose another `MLFLOW_PORT`, such as 5001,
+  instead of terminating a process you did not start.
+- **Startup timeout or inaccessible UI:** inspect the `log_path` displayed by the service
+  handle and the startup error; check the selected port and local environment. The helper
+  waits for service readiness before continuing.
+- **Kernel restarted:** run setup/startup again. Ownership is local to a kernel; the new kernel
+  does not adopt or stop a service left by another process. Normal cleanup stops the owned
+  service; if a previous service still occupies the port, choose another port or stop it from
+  the session that owns it. Stored runs remain on disk.
+- **Grid too large:** shorten the value lists or deliberately raise `MAX_TRIALS`. The notebook
+  displays the product, not just the number of fields.
+- **Insufficient history/paired observations:** inspect the requested dates, mapping, tenors,
+  finite own prices and EEX publications. Five validation dates still require earlier usable
+  calibration dates. A history/correlation/cross toggle cannot create missing evidence.
+- **Stop the UI:** set `STOP_SERVER=True` and run the final cell, or call `server.stop()`.
+  Leave it `False` for normal Run All use so the UI remains available after the run.
+
+## 8. Verified execution
+
+On Windows with Python **3.14.2** and MLflow **3.17.0**, the full test suite passed **623 tests**, with one upstream
+MLflow/SQLAlchemy deprecation warning. The notebook was also executed through the actual
+`.venv` Jupyter kernel with its default six-combination grid: one parent and six completed
+child runs, **25 calibration dates / 290 paired cases**, and **5 validation dates / 58 cases**
+for the selected candidate only. Report artifact upload/download, an HTTP 200 response from
+the UI, and retention of experiment records after stopping/restarting the service were checked.
+
+These checks establish the tested local workflow, not predictive accuracy on unavailable
+real own data, the optimality of synthetic winning parameters, or runtime verification on
+every supported Python version and operating system. The notebook saved in Git has no outputs.

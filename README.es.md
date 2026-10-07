@@ -34,6 +34,14 @@ La referencia completa documenta controles avanzados para auditoría y cambios d
 `tune` admite seis controles del modelo, pero sin opciones adicionales compara solo los tres
 modos y mantiene el resto fijo. No busca automáticamente entre todas las entradas del TOML.
 
+Para editar listas de parámetros, arrancar MLflow local automáticamente y guardar comparaciones,
+usa [el notebook de backtest](notebooks/backtest_mlflow.ipynb) y su [guía MLflow](MLFLOW.es.md).
+Empieza con una demo sintética autónoma y seis combinaciones; después admite tus datos reales
+en el otro ordenador. Su grid ampliado incluye alcance local, memoria histórica, promedios EEX
+y shape; la guía detalla los campos admitidos y los límites de evaluación.
+Instálalo con `uv sync --group notebook --group experiment`. Propone parámetros sin aplicarlos
+al config ni a las curvas de producción.
+
 ## Instalación
 
 Requiere Python 3.11 o posterior. Desde la carpeta del proyecto, utiliza una de estas opciones:

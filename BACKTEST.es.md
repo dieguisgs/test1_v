@@ -5,6 +5,12 @@
 Esta guía distingue el comportamiento implementado de las propuestas que todavía no existen.
 La capa shape del apartado final está implementada y apagada por defecto; los experimentos y alternativas indicados como propuestas siguen pendientes.
 
+El [notebook y la guía MLflow](MLFLOW.es.md) permiten editar listas de candidatos, registrar
+experimentos locales, ejecutar una demo sintética y utilizar un grid ampliado del modelo.
+Aquí `tune` se refiere al comando CLI con sus seis campos originales salvo indicación expresa.
+Ambos usan el mismo criterio de cobertura primero y validación cronológica solo del ganador.
+El ejemplo del notebook reserva cinco fechas; el valor predeterminado del CLI sigue siendo veinte.
+
 ## 1. Qué significa «mejor relleno»
 
 El objetivo principal es recuperar precios propios que faltan. EEX aporta información, pero
@@ -85,9 +91,14 @@ Tampoco repite actualmente varios cortes temporales ni da incertidumbre sobre el
 
 ## 4. Qué parámetros se pueden comparar
 
-La rejilla automática admite exactamente seis campos:
+La rejilla del comando CLI admite seis campos:
 `basis_mode`, `tau_log`, `shrink_k`, `layer_hist`, `layer_correlation`, `layer_cross`.
 Por defecto solo varía los tres modos de basis; las otras dimensiones requieren listas explícitas.
+
+El [notebook de experimentos](MLFLOW.es.md) añade campos de memoria, fallback y shape a su
+grid; esa guía enumera sus nombres Python exactos. Las indicaciones «fijo en tune» de la tabla
+siguiente se refieren al CLI. Los filtros que cambian las observaciones evaluadas siguen
+excluidos de ambos grids.
 
 | Familia | Controles actuales | Qué permiten estudiar |
 |---|---|---|
@@ -369,9 +380,10 @@ universo. Un número de años no certifica solapamiento ni cobertura suficientes
 
 `pipeline_configured` evalúa shape después de ocultar el periodo y todos sus alias: la verdad
 oculta no puede actuar como restricción original de shape. Historia y cross siguen aprendiendo
-solo de originales reales. Tune mantiene sus seis dimensiones; shape queda fijo en toda la
-rejilla y se guarda con la configuración. Compara configuraciones de shape en ejecuciones
-emparejadas: errores, extremos, cobertura, residuos, tamaño de cambios y movimiento de propios.
+solo de originales reales. El CLI mantiene sus seis dimensiones y shape fijo; el
+[notebook de experimentos](MLFLOW.es.md) sí puede incluir explícitamente los campos shape
+en su grid. Compara sobre observaciones emparejadas: errores, extremos, cobertura, residuos,
+tamaño de cambios y movimiento de propios.
 Ocultar bloques y validar múltiples orígenes siguen siendo protocolos propuestos, no nuevas
 funcionalidades de esta capa.
 

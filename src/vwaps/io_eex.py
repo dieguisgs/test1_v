@@ -14,11 +14,48 @@ from pathlib import Path
 
 import pandas as pd
 
+from vwaps.config import Config
 from vwaps.dates import parse_reference_dates
+from vwaps.identity import CurveKey
 from vwaps.log import get_logger
+from vwaps.mapping import ProductMap, eex_path
 from vwaps.tenors import Key, period_from_eex
 
 REQUIRED = ["tradeDate", "maturityType", "deliveryStart", "settlPx"]
+
+
+def load_eex_books(cfg: Config, maps: list[ProductMap]) -> dict[CurveKey, EexBook | None]:
+    """Load active mappings once per file with the same policy in CLI and notebooks.
+
+    An absent file is explicitly unavailable. A present malformed file aborts
+    the run rather than silently reducing the information used by a backtest.
+    """
+    books: dict[CurveKey, EexBook | None] = {}
+    cache: dict[Path, EexBook | None] = {}
+    for mapping in maps:
+        if not mapping.active:
+            continue
+        path = eex_path(cfg, mapping)
+        if path is None:
+            books[mapping.key] = None
+            continue
+        path = path.resolve()
+        if path not in cache:
+            try:
+                cache[path] = EexBook.from_file(path)
+            except FileNotFoundError:
+                get_logger().error(
+                    "%s: EEX file %s does not exist -> no EEX (check eex_file in %s)",
+                    mapping.product, path, cfg.mapping_file.name,
+                )
+                cache[path] = None
+            except Exception as exc:
+                raise ValueError(
+                    f"{mapping.label}: cannot read EEX file {path}: {exc}. "
+                    "No result files written; repair the input and retry."
+                ) from exc
+        books[mapping.key] = cache[path]
+    return books
 
 
 def load_eex_frame(path: Path) -> pd.DataFrame:

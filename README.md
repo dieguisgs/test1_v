@@ -34,6 +34,14 @@ The full reference documents advanced controls for auditing and deliberate chang
 `tune` supports six model controls, but its default comparison tries only the three basis
 modes and holds everything else fixed. It does not search across every TOML entry.
 
+For editable parameter lists, automatic local MLflow startup and saved experiment comparisons,
+use [the backtest notebook](notebooks/backtest_mlflow.ipynb) and its [MLflow guide](MLFLOW.md).
+It starts with a self-contained synthetic demo and six combinations, then supports real data
+on your other computer. Its expanded model grid includes local reach, historical memory,
+EEX averaging and shape; the guide lists the supported fields and evaluation limits.
+Install it with `uv sync --group notebook --group experiment`. It proposes parameters without
+applying them to the config or production curves.
+
 ## Install
 
 Requires Python 3.11 or later. From the project directory, use either:
