@@ -25,7 +25,7 @@ region/unit values are literal identities, never wildcards. Product names cannot
 
 ## Minimum setup to get started
 
-You do not need to tune all 58 entries. **19 are paths, column names and time zones**, not
+You do not need to tune all 59 entries. **19 are paths, column names and time zones**, not
 statistical parameters. Start by reviewing `[paths]`, generating and reviewing the mapping,
 choosing `[targets].tenors`, and keeping `method.basis_mode = "auto"`. Retain the other
 initial values, including `correlation = false`, `cross = false`, `arbitrage = false` and `shape.mode = "off"`.
@@ -171,8 +171,8 @@ a nearby month. Own trades and previous estimates do not train this fallback.
 
 ### Complete windows, fixed contracts and averages
 
-Use the latest distinct publication dates in the EEX file through the reference date,
-ending at the latest snapshot accepted by `eex.max_stale_days`. These are **publication
+Use the latest distinct publication dates in the EEX file through the cutoff
+`reference_date + eex.offset_days`, ending at the latest snapshot accepted by `eex.max_stale_days`. These are **publication
 observations**, not calendar days: reusing a stale settlement on several nonpublication days
 does not increase the sample. Future publications are never used.
 
@@ -268,7 +268,7 @@ anchor_months = 2
 These controls do not change originals or prices with local/historical/cross adjustments.
 Price and spread windows are independent: neither must be larger than the other.
 Maximum staleness governs the latest accepted snapshot; it does not turn the windows into
-calendar-day windows. The 58 configuration keys include these five controls.
+calendar-day windows. The 59 configuration keys include these five controls.
 
 Override them for one `daily`, `refill`, `catchup`, `backtest` or `tune` execution:
 
@@ -346,14 +346,58 @@ method is inherently better.
 an own price for the same curve identity, reference date and delivery period. It neither
 reuses yesterday's price nor depends on the `arbitrage` switch.
 
-### EEX freshness (`[eex]`)
+### EEX availability and freshness (`[eex]`)
 
 | Parameter | Default | Effect of changing it |
 |---|---|---|
+| `offset_days` | `0` | Nonpositive integer calendar-day offset. Only EEX publications dated at or before `reference_date + offset_days` may be used. `0` permits the reference date; `-1` excludes it. |
 | `max_stale_days` | `0` | 0 allows any earlier publication; positive N rejects curves more than N calendar days old; never selects future EEX |
 | `warn_stale_days` | `3` | Stale-curve messages become ERROR at this age; this threshold logs a problem but does not itself reject the curve or fail the run |
 
-Only same-day EEX can train history, regardless of whether a stale curve is accepted for pricing.
+For a curve dated Wednesday 2026-10-07, `offset_days=0` permits the October 7 publication
+if supplied; otherwise it uses the latest earlier one. `offset_days=-1` sets the cutoff to
+October 6 even if October 7 is in the file. On Monday October 5, `-1` means Sunday October 4:
+with no weekend publication, Friday October 2 is selected. This is a calendar offset, not
+"one available publication back". Positive values are rejected.
+
+Age is always `reference_date - eex_asof`, **not cutoff minus publication**. The Friday quote
+is three days old on Monday; `max_stale_days=2` rejects it, while `0` remains unlimited.
+The same cutoff limits the complete EEX price/spread windows. Targets such as `M+1` still
+resolve relative to the original reference date, so October's `M+1` remains November even
+when the accepted EEX publication is from September.
+
+History and covariance learn only exact same-date pairs `own_h / EEX_h` or `own_h - EEX_h`.
+A negative offset delays when those pairs become available: for a prediction on T, the
+pair must have `h<T` and publication date `h<=T+offset_days`. It never learns a basis by
+pairing today's own price with an older EEX publication. Logs identify the reference date,
+cutoff and actual publication; output exposes `eex_offset_days`, `eex_cutoff_date` and
+`eex_asof` (with `curve_` prefixes in enriched output).
+
+With a negative offset, LOCAL can compare today's own anchors with the permitted older EEX
+reference, and HIST can use released earlier pairs. **CROSS has no usable current-day surprise**:
+that branch still requires same-day EEX to avoid treating a publication delay as an own-market
+shock. Its coefficients can learn from delayed exact pairs, but it contributes no current
+cross adjustment under a negative offset. Learned local correlation weights can still be used.
+
+Set `offset_days` in the existing `[eex]` section, or override it for one run:
+
+```powershell
+python run.py daily --date 2026-10-07 --eex-offset-days -1
+python run.py backtest --from 2026-09-01 --to 2026-10-06 --eex-offset-days -1
+```
+
+The override is available in `daily`, `refill`, `catchup`, `backtest` and `tune`. The experiment
+notebook uses `EEX_OFFSET_DAYS=None` to retain the config, or an explicit `0`/`-1` override.
+This is a fixed availability scenario, **not a grid parameter**. Compare scenarios in separate
+experiments and inspect coverage: excluding a publication can change the evaluable sample.
+
+`catchup` still completes pending groups. If existing filled/enriched target rows in the
+requested active scope have a different offset, it stops: explicitly recalculate with
+`refill --eex-offset-days ...` or use another output folder. Legacy missing/blank offset
+metadata means `0`; unrelated dates, curves and targets outside that scope do not block it.
+
+Availability uses publication dates in your supplied CSV, not an intraday clock or a database
+of historical revisions. It cannot prove when a settlement/revision was visible in real time.
 
 ### Mapping time zones (`[timezones]`)
 
@@ -533,6 +577,7 @@ writing results.
 | `--config PATH` | Optional global option; default `config.toml` | Advanced override of the single normal config; goes **before** the command |
 | `--vwap PATH_OR_PATTERN` | `mapping`, `daily`, `catchup`, `refill`, `backtest`, `tune`, `detect-conventions`; defaults to configured input | Override input for this run; quote patterns with wildcards |
 | `--date YYYY-MM-DD` | `daily`; defaults to the machine's local date | Select one reference date |
+| `--eex-offset-days N` | `daily`, `refill`, `catchup`, `backtest`, `tune`; defaults to `[eex].offset_days=0` | Nonpositive calendar-day publication cutoff offset; `-1` excludes same-date EEX. Fixed scenario, not a tuning dimension. |
 | `--from YYYY-MM-DD`, `--to YYYY-MM-DD` | `refill`, `backtest`; defaults inferred from available data | Restrict the requested date range; earlier data can still warm up history |
 | `--from YYYY-MM-DD`, `--to YYYY-MM-DD` | `catchup`; inferred start, end today | Recover pending groups only; future end and reversed ranges rejected |
 | `--last N` | `status`; default 10 | Number of dates to display |
@@ -703,7 +748,7 @@ better prediction or continuity at calendar rollover.
 
 ### Complete [shape] configuration
 
-These seven entries bring the supplied configuration to 58 keys. Defaults are uncalibrated
+These seven entries bring the supplied configuration to 59 keys. Defaults are uncalibrated
 starter values. Detailed formulas, examples, solver diagnostics and history needs are in
 [SHAPE.md](SHAPE.md).
 

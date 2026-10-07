@@ -246,4 +246,9 @@ def enrich_input(
     if unit_warnings:
         get_logger().warning("Unit unavailable in new rows; left empty: %s",
                              "; ".join(map(str, sorted(unit_warnings))))
-    return pd.DataFrame(rows, columns=[*raw.columns, *extra_cols])
+    output = pd.DataFrame(rows, columns=[*raw.columns, *extra_cols])
+    if "curve_eex_offset_days" in output:
+        # Unmapped/raw-only rows have no engine policy. Nullable integers keep
+        # CSV values identical in daily and multi-day runs despite those blanks.
+        output["curve_eex_offset_days"] = pd.array(output["curve_eex_offset_days"], dtype="Int64")
+    return output

@@ -89,6 +89,32 @@ La validación es cronológica con aprendizaje diario: originales de una fecha d
 ya pasada pueden alimentar fechas posteriores. No simula un bloque que permanece sin propios.
 Tampoco repite actualmente varios cortes temporales ni da incertidumbre sobre el ganador.
 
+### Disponibilidad EEX: escenario fijo de evaluación
+
+`eex.offset_days=0` permite publicaciones hasta la referencia T; `-1` solo hasta T-1 día
+natural o anteriores. Elígelo en el TOML, utiliza `--eex-offset-days -1` en `backtest`/`tune`
+o `EEX_OFFSET_DAYS=-1` en el notebook. No es un candidato de ninguno de los grids. El corte
+afecta al benchmark EEX, referencias del pipeline y ventanas de precios/spreads del fallback.
+Las entregas objetivo siguen resolviéndose desde T.
+
+Con offset negativo, el histórico libera parejas originales Propio_h/EEX_h solo si `h<T`
+y `h<=T+offset_days`, conservando h para decaimiento/caducidad. Nunca aprende una pareja de
+fechas distintas. LOCAL e HIST siguen disponibles; la sorpresa actual de CROSS exige EEX
+del mismo día, por lo que no aporta ajuste cross actual con offset negativo, incluso con
+`layer_cross=True`. Las covarianzas cross sí aprenden parejas históricas exactas; los pesos
+de correlación local también siguen siendo utilizables.
+
+En lunes con offset -1, el corte es domingo. La publicación del viernes tiene tres días de
+antigüedad respecto al lunes: `max_stale_days=2` la rechaza y cero sigue siendo sin límite.
+Revisa `eex_offset_days`, `eex_cutoff_date`, `eex_asof` en LOO/predicciones emparejadas y la
+política de disponibilidad en los metadatos de tuning.
+
+Compara 0 y -1 en ejecuciones separadas, identificadas, con las mismas fechas previstas y
+el mismo enmascarado. Un score menor no demuestra por sí solo mejor modelo: cambian la
+referencia EEX y posiblemente los propios evaluables. Informa cobertura y claves comunes;
+empareja expresamente los casos antes de atribuir diferencias a precisión. Las fechas del
+CSV son una convención diaria, no un registro de disponibilidad intradía o revisiones históricas.
+
 ## 4. Qué parámetros se pueden comparar
 
 La rejilla del comando CLI admite seis campos:
@@ -109,7 +135,7 @@ excluidos de ambos grids.
 | EEX suavizado | `eex_fallback.price_method`, `price_window`, `ewma_halflife`, `spread_window`, `anchor_months` | Media/EWMA, publicaciones de precios/spreads, intensidad exponencial y meses ancla. Todos quedan fijos dentro de tune. |
 | Correlación local | `layers.correlation`; `correlation.halflife_days`, `prior_obs` | Activación y memoria/confianza de pesos aprendidos. Solo activación entra en la rejilla. |
 | Ayuda entre curvas | `layers.cross`; `cross.min_corr`, `min_obs`, `halflife_days` | Activación, admisibilidad y memoria de relaciones. Solo activación entra en la rejilla. |
-| Disponibilidad y rutas | `eex.max_stale_days`; `layers.local`, `arbitrage` | Antigüedad admitida, uso del ajuste local y reconstrucción de pendientes. Quedan fijos en tune. |
+| Disponibilidad y rutas | `eex.offset_days`, `max_stale_days`; `layers.local`, `arbitrage` | Corte de publicaciones, antigüedad, ajuste local y reconstrucción. Disponibilidad fija dentro de cada grid; local/arbitrage solo varían si se solicita en el notebook ampliado. |
 
 Los parámetros no incluidos en la rejilla requieren una comparación adicional controlada;
 cambiar el TOML y ejecutar tune varias veces no garantiza por sí solo que los universos de

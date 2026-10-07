@@ -30,9 +30,13 @@ arbitrage   = false    # Opt in to reconstruct unresolved targets from own/alrea
 
 
 [eex]
-# If EEX has not published date T, use its latest past publication and log it.
-# Those dates do not train the historical adjustment.
-# max_stale_days: maximum accepted age (0 = unlimited).
+# Latest publication allowed: reference date + offset_days (calendar days).
+# 0: today's publication if present, otherwise the latest earlier one.
+# -1: exclude today; -2: exclude today and yesterday. Positive values are invalid.
+# The engine logs the cutoff and actual publication used for each curve/date.
+# History learns same-date own/EEX pairs only once their publication is allowed.
+offset_days = 0
+# max_stale_days: maximum age relative to the reference date (0 = unlimited).
 # warn_stale_days: log an ERROR once the publication is this many days old.
 max_stale_days  = 0
 warn_stale_days = 3

@@ -288,8 +288,9 @@ class _Tracker:
             folder.mkdir()
             child = self.children[trial_id] = {"id": run_id, "folder": folder}
             self.client.set_tag(run_id, "vwaps.predictions", "disabled" if not self.log_predictions else "enabled")
+            parameters = {"eex_offset_days": self.cfg.eex_offset_days, **payload["parameters"]}
             self.client.log_batch(run_id, params=[self.entities.Param(key, str(value))
-                                                 for key, value in payload["parameters"].items()], synchronous=True)
+                                                 for key, value in parameters.items()], synchronous=True)
             self.json(run_id, folder, "configuration.json", asdict(self.cfg) | payload["parameters"])
             self.json(run_id, folder, "trial.json", {"trial_id": trial_id, "run_id": run_id,
                                                      "parameters": payload["parameters"]})
@@ -383,6 +384,7 @@ def run_tracked_tuning(
         client.log_batch(run_id, params=[entities.Param(key, str(value)) for key, value in {
             "n_trials": len(candidates), "validation_days": validation_days, "max_trials": max_trials,
             "start": start.isoformat(), "end": end.isoformat(), "data_label": data_label,
+            "eex_offset_days": cfg.eex_offset_days,
         }.items()], synchronous=True)
         tracker.json(run_id, folder, "configuration.json", asdict(cfg))
         tracker.json(run_id, folder, "grid.json", {"parameter_grid": parameter_grid, "candidates": candidates,

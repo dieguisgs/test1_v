@@ -62,6 +62,7 @@ class Config:
     shape_max_abs_adjustment: float = 10.0
     shape_original_weight: float = 10.0
     shape_coherence_tolerance: float = 0.01
+    eex_offset_days: int = 0
 
     def tz(self, area: str) -> str:
         return self.timezones.get(area, self.timezones.get("default", "Europe/Berlin"))
@@ -156,6 +157,9 @@ def validate_config(cfg: Config) -> None:
         isinstance(cfg.max_stale_days, bool) or not isinstance(cfg.max_stale_days, int) or cfg.max_stale_days < 0
     ):
         raise ValueError("eex.max_stale_days must be an integer >= 0 (0 means unlimited in TOML)")
+    if (isinstance(cfg.eex_offset_days, bool) or not isinstance(cfg.eex_offset_days, int)
+            or cfg.eex_offset_days > 0):
+        raise ValueError("eex.offset_days must be an integer <= 0 (calendar days)")
     value = cfg.cross_min_corr
     if (isinstance(value, bool) or not isinstance(value, (int, float))
             or not math.isfinite(value) or not -1 <= value <= 1):
@@ -199,6 +203,7 @@ def load_config(path: str | Path) -> Config:
         layer_arbitrage=layers.get("arbitrage", False),
         max_stale_days=eex.get("max_stale_days", 0),
         warn_stale_days=eex.get("warn_stale_days", 3),
+        eex_offset_days=eex.get("offset_days", 0),
         timezones=dict(raw.get("timezones", {"default": "Europe/Berlin"})),
         tenors=raw.get("targets", {}).get("tenors", []),
         day_convention=conv.get("day", "calendar"),

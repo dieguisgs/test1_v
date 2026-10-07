@@ -127,6 +127,7 @@ def test_tracking_matches_real_engine_selection_reports_and_single_holdout(datas
     children = [run for run in tracking.runs.values() if "mlflow.parentRunId" in run["tags"]]
     assert sum(any(key.startswith("validation.") for key in child["metrics"]) for child in children) == 1
     assert all(child["tags"]["mlflow.parentRunId"] == tracked.run_id for child in children)
+    assert all(run["params"]["eex_offset_days"] == "0" for run in tracking.runs.values())
     assert all(("predictions", "calibration_paired_predictions.csv") in child["artifacts"] for child in children)
     assert tracked.run_url == f"http://127.0.0.1:5000/#/experiments/7/runs/{tracked.run_id}"
     assert tracked.output_dir.name == tracked.run_id

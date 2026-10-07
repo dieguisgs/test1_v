@@ -139,6 +139,43 @@ class EexBook:
     def trade_dates(self) -> list[date]:
         return self._dates
 
+    @staticmethod
+    def cutoff_date(reference_date: date, offset_days: int = 0) -> date:
+        """Latest allowed publication date, in calendar days relative to the curve.
+
+        A negative offset restricts information availability; it never changes
+        the reference date used to resolve delivery tenors.
+        """
+        if isinstance(offset_days, bool) or not isinstance(offset_days, int) or offset_days > 0:
+            raise ValueError("eex.offset_days must be an integer <= 0 (calendar days)")
+        try:
+            return reference_date + timedelta(days=offset_days)
+        except OverflowError as exc:
+            raise ValueError("eex.offset_days places the cutoff outside the supported date range") from exc
+
+    def available_asof(self, reference_date: date, max_stale_days: int | None,
+                       offset_days: int = 0) -> date | None:
+        """Select the latest allowed snapshot, then apply age relative to reference_date."""
+        cutoff = self.cutoff_date(reference_date, offset_days)
+        publication = self.asof(cutoff, None)
+        if publication is None:
+            return None
+        age = (reference_date - publication).days
+        return publication if max_stale_days is None or age <= max_stale_days else None
+
+    def available_quotes(self, reference_date: date, max_stale_days: int | None,
+                         offset_days: int = 0) -> tuple[dict[Key, float], date | None]:
+        """Return one allowed snapshot, including only fixings known by that snapshot.
+
+        Missing contracts do not fall back individually to older snapshots.
+        The unchanged quotes() API remains available for exact historical queries.
+        """
+        self.cutoff_date(reference_date, offset_days)
+        if offset_days == 0:
+            return self.quotes(reference_date, max_stale_days)
+        publication = self.available_asof(reference_date, max_stale_days, offset_days)
+        return self.quotes(publication, 0) if publication is not None else ({}, None)
+
     def asof(self, t: date, max_stale_days: int | None) -> date | None:
         """Last publication date <= t. max_stale_days: None = unlimited; 0 = t only."""
         i = bisect_right(self._dates, t)

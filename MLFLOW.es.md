@@ -52,6 +52,7 @@ modelos; no es un benchmark de mercado neutral.
 | `DATA_MODE` | `"synthetic"` por defecto; cambia a `"real"` en el ordenador con tus ficheros. |
 | `VWAP_PATH` | Input real alternativo opcional. `None` usa el definido en el TOML. Una ruta relativa alternativa parte de la raíz del proyecto. |
 | `START_DATE`, `END_DATE` | Fechas ISO como `"2026-09-01"`, incluidas ambas. `None` utiliza los límites del dataset. |
+| `EEX_OFFSET_DAYS` | `None` respeta `[eex].offset_days` tanto en modo sintético como real. `0` permite publicación en T; `-1` solo hasta T-1 día natural o anteriores. Debe ser un entero no positivo. |
 | `VALIDATION_DAYS` | Número de últimas fechas de observación elegibles reservadas para validar; el ejemplo usa **5**. Son fechas con observaciones, no necesariamente cinco días naturales. |
 | `MAX_TRIALS` | Máximo de combinaciones cartesianas; el ejemplo usa **24**. Un grid mayor falla antes de arrancar el experimento. |
 | `DEMO_SEED`, `DEMO_PERIODS` | Generación sintética reproducible; semilla 7 y 30 periodos por defecto. No afectan al modo real. |
@@ -66,6 +67,33 @@ modelos; no es un benchmark de mercado neutral.
 anterior suministrado. En modo real se conserva tu configuración y se rechaza un valor
 distinto de cero; no se cambia a escondidas. Puede haber histórico anterior a `START_DATE`:
 el rango limita las fechas evaluadas, no ordena descartar el histórico disponible.
+
+### Comparar EEX del mismo día o solo anterior
+
+Usa `EEX_OFFSET_DAYS=0` para permitir EEX publicado en T, o `-1` para excluir T aunque exista
+en el archivo. El corte es `T + offset` en **días naturales**. En lunes, -1 significa domingo:
+la última publicación disponible puede ser la del viernes. Tiene tres días de antigüedad
+respecto al lunes, no dos respecto al domingo. Sigue aplicándose el límite de antigüedad
+(`max_stale_days=0` significa ilimitado). Los tenors se siguen resolviendo desde T.
+
+Es un escenario fijo **fuera de `PARAMETER_GRID`**, no un trigésimo campo del grid. Ejecuta
+el notebook dos veces, por ejemplo con `EXPERIMENT_NAME="vwaps-offset-0"` y
+`"vwaps-offset-minus-1"`, conservando las fechas previstas y el grid. La preparación muestra
+la política efectiva; el snapshot del config y los metadatos la guardan. Los archivos de
+predicciones emparejadas incluyen `eex_offset_days`, `eex_cutoff_date`, `eex_asof` si se activa
+su registro. Benchmark EEX, refill y ventanas completas de medias respetan el mismo corte.
+
+Las parejas históricas Propio_h/EEX_h se liberan con retraso solo si `h<T` y `h<=corte`,
+manteniendo sus fechas originales para caducidad/decaimiento. LOCAL puede usar propios
+actuales frente a la referencia anterior permitida. **No hay ajuste CROSS actual con offset
+negativo**, porque su sorpresa exige EEX del mismo día; sus relaciones sí pueden aprender
+parejas históricas exactas. HIST y los pesos aprendidos de correlación local siguen siendo
+utilizables si hay evidencia suficiente.
+
+Cambiar disponibilidad puede modificar muestra evaluable, cobertura y referencia. Un score
+menor en otro escenario no es automáticamente mejor: revisa casos ocultados comunes y
+cobertura. Es una convención diaria sobre CSVs suministrados, no un reloj de publicación
+intradía ni una reconstrucción de las revisiones disponibles históricamente.
 
 ## 3. ¿Qué parámetros se pueden comparar?
 
@@ -125,7 +153,7 @@ fallback: es una comparación controlada de esa rama, no de toda la configuraci�
 
 Todo campo omitido permanece fijo. No pueden ser campos del grid las rutas, mapping/identidad,
 tenors, convenciones de entrega, filtros de volumen/extremos, protecciones del ratio, antigüedad
-EEX ni fechas de evaluación. Cambiarlos podría cambiar las observaciones que se comparan.
+EEX, offset de disponibilidad ni fechas de evaluación. Cambiarlos podría cambiar las observaciones que se comparan.
 Una clave no admitida genera error. Para estudiar ese cambio, diseña otra evaluación con un
 universo de verdad explícitamente comparable; no presentes muestras distintas como la misma
 competición.
@@ -218,6 +246,8 @@ y [MLflow Tracking](https://mlflow.org/docs/latest/ml/tracking/).
    cobertura máxima y, entre esas filas, gana el score menor. La etiqueta de la hija
    **`vwaps.selected` = `true`** identifica al ganador real. Si hay empate exacto, revisa
    `trial_id` y el orden del grid en el informe.
+   El parámetro fijo **`eex_offset_days`** se guarda en el padre y en cada hija: muéstralo
+   o fíltralo para distinguir los escenarios 0 y -1 antes de comparar ejecuciones.
 3. Selecciona ejecuciones hijas para comparar sus parámetros y métricas. Mira también
    `calibration.overall.n_paired` y `calibration.overall.n_missing`. Las métricas
    **`validation.*` aparecen solo en la hija ganadora y el padre**: su ausencia en las demás
@@ -250,6 +280,7 @@ DATA_MODE = "real"
 VWAP_PATH = r"C:\Data\VWAPS\observations.xlsx"  # Or None to use config.toml.
 START_DATE = "2026-08-10"
 END_DATE = "2026-10-06"
+EEX_OFFSET_DAYS = -1  # Example policy: exclude same-date EEX; None retains the TOML.
 VALIDATION_DAYS = 5
 EXPERIMENT_NAME = "vwaps-real-first-review"
 ```
@@ -284,12 +315,17 @@ histórico previo para las técnicas que quieras comparar.
 
 ## 8. Ejecución comprobada
 
-En Windows con Python **3.14.2** y MLflow **3.17.0**, la suite completa pasó **623 tests**, con un aviso de
-deprecación de MLflow/SQLAlchemy. También se ejecutó el notebook en el kernel Jupyter real
-de `.venv`, con su grid inicial de seis combinaciones: un padre y seis hijas completadas,
-**25 fechas de calibración / 290 casos emparejados** y **5 fechas de validación / 58 casos**
-solo para la combinación elegida. Se comprobaron subida/descarga de informes, respuesta
-HTTP 200 de la interfaz y conservación de registros al detener y volver a arrancar el servicio.
+En Windows con Python **3.14.2** y MLflow **3.17.0**, la suite completa pasó **715 tests** en
+44,70 segundos, con un aviso de deprecación de MLflow/SQLAlchemy. Se ejecutó el notebook en
+el kernel Jupyter real de `.venv` tanto con el offset predeterminado **0** como con **-1**
+explícito. La ejecución -1 completó las seis hijas candidatas bajo un padre, con **25 fechas
+de calibración / 290 casos emparejados** y **5 fechas de validación / 58 casos** solo para
+la ganadora. Se revisaron los CSV guardados de predicciones emparejadas para comprobar que
+cada publicación admitida cumple **`eex_asof <= eex_cutoff_date = T - 1 día natural`**.
+
+La ejecución -1 comprobó también respuesta HTTP 200 de la interfaz local y parada limpia
+del servicio. Las pruebas anteriores con offset predeterminado verificaron subida/descarga
+de informes y conservación de registros al detener y volver a arrancar el servicio.
 
 Estas comprobaciones validan el flujo local probado, no la precisión con propios reales que
 no tenemos, la optimalidad de los parámetros ganadores sintéticos ni la ejecución en todas

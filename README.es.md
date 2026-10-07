@@ -25,7 +25,7 @@ Región/unidad vacías son valores literales, nunca comodines. El producto no pu
 
 ## Configuración mínima para empezar
 
-No necesitas ajustar las 58 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
+No necesitas ajustar las 59 entradas. **19 son rutas, nombres de columnas y zonas horarias**;
 no son parámetros estadísticos. Para arrancar, revisa `[paths]`, genera y revisa el mapping,
 elige `[targets].tenors` y deja `method.basis_mode = "auto"`. Mantén los demás valores
 iniciales, incluidas `correlation = false`, `cross = false`, `arbitrage = false` y `shape.mode = "off"`.
@@ -171,8 +171,8 @@ No usamos operaciones propias ni estimaciones anteriores para entrenar este resp
 
 ### Ventanas completas, contratos fijos y medias
 
-Se toman las últimas publicaciones distintas del archivo EEX hasta la fecha de referencia,
-terminando en el último snapshot permitido por `eex.max_stale_days`. Son **observaciones
+Se toman las últimas publicaciones distintas del archivo EEX hasta el corte
+`reference_date + eex.offset_days`, terminando en el último snapshot permitido por `eex.max_stale_days`. Son **observaciones
 publicadas**, no días naturales: repetir un settlement antiguo en varios días sin publicación
 no aumenta la muestra. Nunca se toman publicaciones futuras.
 
@@ -269,7 +269,7 @@ anchor_months = 2
 Estos controles no afectan a originales ni a precios con ajuste local/histórico/cross.
 Las ventanas de precio y spread son independientes: no se exige que una sea mayor que la otra.
 La antigüedad máxima controla el último snapshot permitido, no convierte las ventanas en
-ventanas de días naturales. Las 58 claves del config incluyen estos cinco controles.
+ventanas de días naturales. Las 59 claves del config incluyen estos cinco controles.
 
 En `daily`, `refill`, `catchup`, `backtest` y `tune` se pueden sustituir para una ejecución:
 
@@ -347,14 +347,60 @@ disponible; no clasifica un método como intrínsecamente mejor que otro.
 un precio propio de la misma identidad, fecha de referencia y periodo de entrega. No arrastra
 el precio de ayer ni depende del interruptor `arbitrage`.
 
-### Antigüedad EEX (`[eex]`)
+### Disponibilidad y antigüedad EEX (`[eex]`)
 
 | Parámetro | Defecto | Efecto de cambiarlo |
 |---|---|---|
+| `offset_days` | `0` | Entero no positivo en días naturales. Solo admite publicaciones EEX con fecha <= `reference_date + offset_days`. `0` permite la fecha de referencia; `-1` la excluye. |
 | `max_stale_days` | `0` | 0 admite cualquier publicación anterior; N positivo rechaza curvas con más de N días naturales de antigüedad; nunca selecciona EEX futuro |
 | `warn_stale_days` | `3` | A esta antigüedad el mensaje pasa a ERROR; informa del problema, pero este umbral no rechaza por sí mismo la curva ni hace fallar la ejecución |
 
-Solo EEX del mismo día permite aprender historia, aunque se admita una curva antigua para valorar.
+Para una curva del miércoles 07-10-2026, `offset_days=0` permite la publicación del 7 si está
+en los datos; si falta, toma la última anterior. `offset_days=-1` pone el corte en el 6 aunque
+el archivo ya contenga el 7. El lunes 05-10, `-1` significa domingo 04-10: si no se publica
+el fin de semana, se selecciona el viernes 02-10. Son días naturales, no «retroceder una
+publicación disponible». Se rechazan los valores positivos.
+
+La antigüedad siempre es `reference_date - eex_asof`, **no corte menos publicación**. Ese
+viernes tiene tres días de antigüedad el lunes: `max_stale_days=2` lo rechaza y `0` sigue
+significando sin límite. El mismo corte limita las ventanas completas de precios/spreads
+EEX. Los objetivos `M+1`, etc. siguen resolviéndose respecto a la fecha original de referencia:
+en octubre `M+1` sigue siendo noviembre aunque la publicación EEX utilizada sea de septiembre.
+
+Historia y covarianzas solo aprenden parejas exactas `propio_h / EEX_h` o `propio_h - EEX_h`
+de la misma fecha. Un offset negativo retrasa su disponibilidad: para predecir T se exige
+`h<T` y fecha de publicación `h<=T+offset_days`. Nunca aprende mezclando el propio de hoy
+con una publicación EEX anterior. El log indica referencia, corte y publicación real; el
+output incorpora `eex_offset_days`, `eex_cutoff_date` y `eex_asof`, con prefijo `curve_` en
+el enriquecido.
+
+Con offset negativo, LOCAL puede comparar las anclas propias de hoy con el EEX anterior
+permitido e HIST usar las parejas anteriores ya disponibles. **CROSS no tiene sorpresa actual
+utilizable**: esa rama sigue exigiendo EEX del mismo día para no interpretar el retraso de
+publicación como un movimiento propio. Sus coeficientes pueden aprender parejas exactas con
+retraso, pero no aporta ajuste cross actual con offset negativo. Los pesos aprendidos de
+correlación local sí pueden seguir utilizándose.
+
+Edita `offset_days` en la sección `[eex]` existente o sustitúyelo para una ejecución:
+
+```powershell
+python run.py daily --date 2026-10-07 --eex-offset-days -1
+python run.py backtest --from 2026-09-01 --to 2026-10-06 --eex-offset-days -1
+```
+
+La opción existe en `daily`, `refill`, `catchup`, `backtest` y `tune`. El notebook utiliza
+`EEX_OFFSET_DAYS=None` para respetar el config, o `0`/`-1` explícitos. Es un escenario fijo de
+disponibilidad, **no un parámetro del grid**. Compáralos en experimentos separados y revisa
+cobertura: excluir una publicación puede cambiar qué observaciones se pueden evaluar.
+
+`catchup` sigue completando grupos pendientes. Si encuentra filas objetivo existentes de
+filled/enriched con otro offset dentro del alcance activo solicitado, se detiene: recalcula
+expresamente con `refill --eex-offset-days ...` o usa otra carpeta de output. Un offset ausente
+o vacío en ficheros antiguos equivale a `0`; otras fechas, curvas y targets fuera de ese alcance
+no bloquean la ejecución.
+
+Se usan las fechas de publicación del CSV suministrado, no un reloj intradía ni un archivo de
+versiones históricas. No demuestra a qué hora estuvo disponible un settlement o una revisión.
 
 ### Zonas horarias del borrador de mapeo (`[timezones]`)
 
@@ -538,6 +584,7 @@ El esquema de históricos y archivos afectados se valida antes de escribir resul
 | `--config RUTA` | Global opcional; defecto `config.toml` | Permite otro config para uso avanzado; se escribe **antes** del comando |
 | `--vwap RUTA_O_PATRÓN` | `mapping`, `daily`, `catchup`, `refill`, `backtest`, `tune`, `detect-conventions`; defecto input configurado | Cambia el input de esa ejecución; entrecomilla patrones con comodines |
 | `--date YYYY-MM-DD` | `daily`; defecto fecha local de la máquina | Elige una fecha de referencia |
+| `--eex-offset-days N` | `daily`, `refill`, `catchup`, `backtest`, `tune`; defecto `[eex].offset_days=0` | Offset no positivo del corte de publicación en días naturales; `-1` excluye EEX de T. Escenario fijo, no dimensión del grid. |
 | `--from YYYY-MM-DD`, `--to YYYY-MM-DD` | `refill`, `backtest`; por defecto se deducen de los datos disponibles | Acota el rango solicitado; los datos anteriores pueden seguir calentando la memoria |
 | `--from YYYY-MM-DD`, `--to YYYY-MM-DD` | `catchup`; inicio inferido, final hoy | Recupera solo pendientes; no admite final futuro ni rango invertido |
 | `--last N` | `status`; defecto 10 | Número de fechas a mostrar |
@@ -711,7 +758,7 @@ garantiza mejor predicción ni continuidad al cambiar el calendario.
 
 ### Configuración completa [shape]
 
-Estas siete entradas completan las 58 claves del config. Los valores iniciales no están
+Estas siete entradas completan las 59 claves del config. Los valores iniciales no están
 calibrados. [SHAPE.es.md](SHAPE.es.md) detalla fórmulas, ejemplos, diagnóstico e histórico.
 
 | Clave | Inicial | Significado y efecto |

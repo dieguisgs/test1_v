@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from vwaps.backtest import compare_truth, summarize_loo
-from vwaps.config import Config, load_config, validate_fallback_config, validate_shape_config
+from vwaps.config import Config, load_config, validate_config
 from vwaps.dates import parse_reference_dates
 from vwaps.enrich import enrich_input
 from vwaps.fill import CurveFiller
@@ -92,6 +92,9 @@ def main(argv: list[str], config_path: Path) -> int:
 
     for command in ("daily", "refill", "catchup", "backtest", "tune"):
         parser = sub.choices[command]
+        parser.add_argument("--eex-offset-days", type=int, default=None,
+                            help="latest allowed EEX publication is reference date plus this calendar-day "
+                                 "offset (0 or negative); staleness remains measured from the reference date")
         group = parser.add_argument_group("EEX fallback transformation (override config for this run)")
         group.add_argument("--eex-price-method", dest="fallback_price_method", choices=("simple", "ewma"),
                            default=None, help="finite-window price average: equal or exponential weights")
@@ -128,13 +131,12 @@ def main(argv: list[str], config_path: Path) -> int:
             "fallback_spread_window", "fallback_anchor_months",
             "shape_mode", "shape_adjust_originals", "shape_smoothness_weight",
             "shape_coherence_weight", "shape_max_abs_adjustment", "shape_original_weight",
-            "shape_coherence_tolerance",
+            "shape_coherence_tolerance", "eex_offset_days",
         ) if getattr(a, name, None) is not None}
         if "shape_adjust_originals" in overrides:
             overrides["shape_adjust_originals"] = overrides["shape_adjust_originals"] == "on"
         cfg = replace(cfg, **overrides)
-        validate_fallback_config(cfg)
-        validate_shape_config(cfg)
+        validate_config(cfg)
         return {
             "mapping": cmd_mapping, "daily": cmd_daily, "refill": cmd_refill,
             "catchup": cmd_catchup, "status": cmd_status,
@@ -311,7 +313,8 @@ def _layers(cfg: Config) -> str:
     on = [n for n, v in [("local", cfg.layer_local), ("correlation", cfg.layer_correlation),
                          ("cross", cfg.layer_cross), ("arbitrage", cfg.layer_arbitrage)] if v]
     return (f"Layers: {', '.join(on)} | hist={cfg.layer_hist} | mode={cfg.basis_mode} "
-            f"| shape={cfg.shape_mode} | shape_adjust_originals={cfg.shape_adjust_originals}")
+            f"| shape={cfg.shape_mode} | shape_adjust_originals={cfg.shape_adjust_originals} "
+            f"| eex_offset_days={cfg.eex_offset_days}")
 
 
 # --------------------------------------------------------------- commands
@@ -398,21 +401,50 @@ def cmd_daily(cfg: Config, a) -> int:
     return 0
 
 
-def _history_point_keys(path: Path, enriched: bool = False) -> set[tuple]:
-    """Presence means processed, including rows whose price is missing."""
+def _history_point_keys(path: Path, enriched: bool = False, *,
+                        eex_offset_days: int | None = None,
+                        required_points: set[tuple] | None = None) -> set[tuple]:
+    """Read processed keys and reject reuse with another EEX availability policy.
+
+    Presence includes missing prices. Legacy rows without a policy column or
+    with an empty policy cell were calculated with offset zero. Policy checks
+    apply only to requested targets, excluding unrelated dates and raw rows
+    whose contracts were not calculated by the engine.
+    """
     if not path.exists():
         return set()
     prefix = "curve_" if enriched else ""
     columns = [f"{prefix}{name}" for name in [*KEYS, "tenor"]]
     _validate_output_schema(path, columns)
+    policy_column = f"{prefix}eex_offset_days"
+    header = pd.read_csv(path, encoding="utf-8-sig", nrows=0).columns
+    read_columns = [*columns, *([policy_column] if policy_column in header else [])]
     frame = pd.read_csv(path, encoding="utf-8-sig", dtype=str, keep_default_na=False,
-                        usecols=columns)
+                        usecols=read_columns)
     frame = frame.rename(columns={column: column.removeprefix(prefix) for column in columns}) if prefix else frame
     dates = pd.to_datetime(frame["reference_date"], format="mixed", errors="coerce").dt.date
     if dates.isna().any():
         raise ValueError(f"Output history {path} contains empty or invalid reference dates")
-    return {(day, *curve, str(tenor).strip())
-            for day, curve, tenor in zip(dates, curve_keys(frame), frame["tenor"])}
+    points = [(day, *curve, str(tenor).strip())
+              for day, curve, tenor in zip(dates, curve_keys(frame), frame["tenor"])]
+    if eex_offset_days is not None:
+        policies = frame[policy_column] if policy_column in frame else [""] * len(frame)
+        for point, value in zip(points, policies):
+            if required_points is not None and point not in required_points:
+                continue
+            text = str(value).strip()
+            try:
+                saved = float(text) if text else 0.0
+            except ValueError:
+                saved = math.nan
+            if not math.isfinite(saved) or saved > 0 or not saved.is_integer() or saved != eex_offset_days:
+                raise ValueError(
+                    f"Catchup cannot reuse {path} row {point}: saved EEX offset "
+                    f"{text or '0 (legacy)'} differs from or is invalid for requested offset {eex_offset_days}. "
+                    f"Run refill for this range with --eex-offset-days {eex_offset_days} "
+                    "to recalculate explicitly, or select another paths.output_dir. No result files written."
+                )
+    return set(points)
 
 
 def _reference_days(cfg: Config, raw: pd.DataFrame, maps: list[ProductMap], books: dict,
@@ -437,8 +469,6 @@ def cmd_catchup(cfg: Config, a) -> int:
     if a.start is not None and a.start > end:
         raise ValueError("The start date cannot be later than the end date")
     _validate_output_schema(cfg.output_dir / "consistency_history.csv", KEYS)
-    completed_filled = _history_point_keys(cfg.output_dir / "filled_history.csv")
-    completed_enriched = _history_point_keys(cfg.output_dir / "enriched_history.csv", enriched=True)
     vw, raw, maps, books = _load(cfg, a.vwap)
     outputs = [m for m in maps if m.active and m.use == "fill"]
     if not outputs:
@@ -455,6 +485,19 @@ def cmd_catchup(cfg: Config, a) -> int:
         raise ValueError("The start date cannot be later than the end date")
 
     days = _reference_days(cfg, raw, maps, books, start, end)
+    required_points = {
+        (day, *mapping.key, tenor)
+        for day in days for mapping in outputs for tenor in dict.fromkeys(cfg.tenors)
+        if resolve_tenor(tenor, day, cfg.day_convention, cfg.weekend_offset) is not None
+    }
+    completed_filled = _history_point_keys(
+        cfg.output_dir / "filled_history.csv", eex_offset_days=cfg.eex_offset_days,
+        required_points=required_points,
+    )
+    completed_enriched = _history_point_keys(
+        cfg.output_dir / "enriched_history.csv", enriched=True,
+        eex_offset_days=cfg.eex_offset_days, required_points=required_points,
+    )
     pending: set[tuple[date, CurveKey]] = set()
     for day in sorted(days):
         targets = [label for label in dict.fromkeys(cfg.tenors)

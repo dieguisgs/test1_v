@@ -18,7 +18,7 @@ which cover only some contracts, and **EEX settlements**, which provide much of 
 
 ## What to configure and what to leave at its initial value
 
-The 58 entries in `config.toml` are not 58 parameters you must optimize: 19 are paths,
+The 59 entries in `config.toml` are not 59 parameters you must optimize: 19 are paths,
 column names and time zones. For a first run, review paths, identity mappings and target
 tenors, and keep the `auto` calculation mode. The `correlation`, `cross` and `arbitrage` layers stay
 disabled. Advanced controls are documented so changes are deliberate and auditable,
@@ -124,9 +124,10 @@ cases that use EEX.
 | 9. Outside activated scope | Unmapped, `off`, or empty `eex_file` | No estimated curve; originals remain in the requested enriched scope | Review mapping. An absent tenor outside targets is not created either |
 
 An EEX path **assigned but lacking data** keeps a curve active: originals and, if enabled, arbitrage may
-be used. **No assigned source** excludes it. When today's EEX publication is unavailable,
-the latest earlier publication may be used under `[eex]`, never a future one. Its age is
-recorded and that date does not train memory using the stale reference.
+be used. **No assigned source** excludes it. Use the latest publication on or before
+`T + eex.offset_days` under `[eex]`, never a later one. Its age is measured from T. Today's
+original is not paired with that older reference for training; earlier exact same-date pairs
+can become available with delay. Section 20 explains the availability policy.
 
 A strip requires complete contiguous coverage and weights prices by hours. A residual values
 the tail as `(parent_price×parent_hours−head_value)/tail_hours`. A small tail amplifies errors
@@ -147,8 +148,10 @@ The refill diagnostics report inconsistencies without forcing aggregates to agre
    otherwise → ratio.
 5. **Adjustment.** Combine local, permitted history and enabled cross using w. Record price,
    origin, method and evidence; a valid original is not adjusted.
-6. **Subsequent learning.** After predicting the date, update memories with admissible
-   originals and EEX from that same date. Never learn from estimates.
+6. **Learning and availability.** With offset zero, learn from admissible same-date own/EEX
+   pairs after prediction. A negative offset releases earlier exact pairs before prediction,
+   only when their dates are before T and no later than the cutoff. Never learn from estimates
+   or pair today's own with stale EEX. See section 20.
 
 By default, a ratio anchor requires `abs(EEX)>=1`, `Own/EEX>0` and `abs(Own/EEX−1)<=1`.
 Thus −10 against −12 may work; 2 against 0, own zero or opposite signs do not. Excessive
@@ -480,8 +483,9 @@ With `w=0`, `basis=4`, price **104**. Output:
 `estimated / eex+hist / additive_history`; `curve_basis_hist=4`,
 empty `curve_basis_local`, `curve_local_weight=0`.
 
-Memory was learned from original Own/EEX pairs on the same dates, after predicting those
-earlier dates. Its EWMA learns differences on observed days; expiry uses calendar days.
+Memory was learned from original Own/EEX pairs on the same dates: after predicting those
+dates at offset zero, or when earlier exact pairs are released under a negative offset.
+Its EWMA learns differences on observed days; expiry uses original observation calendar dates.
 **History +4 without target EEX produces neither 4 nor 104**: the price level to adjust is
 absent. The last price is not carried forward. Without usable history, try enabled cross with
 sufficient evidence; without components, smooth EEX. Without EEX, only optional reconstruction
@@ -849,9 +853,11 @@ different contracts; matching delivery dates avoids that ambiguity.
 
 ### Step 1 — Select the EEX curve
 
-- Use EEX settlements for date T.
-- **If EEX has not published T**, use the latest earlier publication and log the selected
-  date and its age, for example 1 October unavailable, using 29 September, two days earlier.
+- Set `cutoff = T + eex.offset_days` in calendar days; offset zero is the default.
+- Use the latest EEX publication on or before that cutoff, subject to age measured from T.
+  A cutoff is a limit, not a demand for an exact publication on that date. Logs record T,
+  cutoff, chosen publication and age. For example, 1 October with offset -1 excludes 1 October;
+  if 30 September is missing, 29 September may be used and is two days old relative to T.
   At `warn_stale_days`, the log level becomes ERROR. That level alone does not fail the run;
   `max_stale_days` decides whether the curve is accepted.
 - Add fixings for already delivered Day contracts within 45 days before the selected curve's
@@ -1085,11 +1091,13 @@ produces +2.133934 in price units. Applied alone to EEX = 150, it gives
 `150 + 2.133934 = 152.133934`, not `153.200901`, which belonged to the percentage example.
 Auto preserves this separation of units.
 
-**Exact learning order.** Before predicting a day, expire old means and prepare both anchor
-lists. Select the formula for each gap and predict using earlier memory only. Then, separately
-for each mode/group, compare the historical prediction and unadjusted EEX on that mode's
-eligible anchors; update its `hist = auto` scores and surprise relationships. Finally update
-both EWMAs using that day's original anchors, only when EEX is from the same date. The first
+**Exact learning order.** With `eex.offset_days=0`, expire old means and prepare both anchor
+lists before predicting. Select each gap's formula using earlier memory only. Then, separately
+for each mode/group, compare the historical prediction and exact same-date EEX on eligible
+original anchors; update `hist = auto` scores, surprise relationships and both EWMAs.
+With a negative offset, release eligible earlier exact own/EEX pairs chronologically before
+predicting T, with `h<T` and `h<=T+offset_days`. Use their original dates h for decay and expiry,
+not the later release date. Do not learn today's own against a stale EEX snapshot. The first
 observation initializes a mean; later observations apply α. Both modes learn even if that
 day's gaps used only one mode, and also when ratio or additive is forced.
 
@@ -1306,7 +1314,7 @@ summary or `status`.
 
 ## 6. Parameters (`config.toml`)
 
-Summary of the main controls. **Section 14 details all 58 config.toml keys**, including
+Summary of the main controls. **Section 14 details all 59 config.toml keys**, including
 aliases, time zones, sensitivity, conditions of use and constraints.
 
 **Layers** (`[layers]`) control execution without code changes:
@@ -1328,6 +1336,7 @@ aliases, time zones, sensitivity, conditions of use and constraints.
 | | `eex_curves_dir` | `../eex_scraper/output/curves/POWER` | Root of EEX curve files | |
 | | `output_dir` | `output` | Output directory | |
 | `eex` | `max_stale_days` | 0, unlimited | Maximum accepted EEX age; positive N rejects older curves | |
+| | `offset_days` | 0 | Latest publication cutoff is T plus this nonpositive calendar-day offset | -1 excludes T; does not move target delivery dates |
 | | `warn_stale_days` | 3 | Age at which the log message becomes ERROR | |
 | `timezones` | by area | Europe/Berlin | Used only when drafting the mapping | |
 | `targets` | `tenors` | Complete configured list | Target labels to calculate | |
@@ -1711,6 +1720,7 @@ obtained from an already observed equivalent contract with another label.
 | `curve_eex_settle` | Direct or constructed EEX price for the target period |
 | `curve_eex_method` | Exact/strip/residual method of the EEX reference. If fallback fails and arbitrage succeeds, this retains the reference method when present; otherwise it uses arbitrage method. Final reconstruction is in `estimation_method=contract_*` |
 | `curve_eex_asof` | Selected EEX curve date, allowing its age to be checked |
+| `curve_eex_offset_days`, `curve_eex_cutoff_date` | Applied publication offset and latest allowed date; do not replace the reference date or tenor calendar |
 | `curve_eex_fallback_trace` | Complete smoothed-fallback JSON: prices, weights, publications and monthly cascade; empty outside that branch |
 | `curve_basis` | Pre-shape EEX adjustment, after any configured ratio clipping; shape has a separate additive delta |
 | `curve_basis_local` | Adjustment from today's anchors |
@@ -1757,7 +1767,8 @@ For an estimated `M+4` row, review the following:
 5. **History and cross.** Reconstruct history from earlier originals and contemporaneous EEX,
    expiring each mean under `hist_max_age_days`. Check that `hist = off/auto` allows the
    recorded prior. If `curve_cross_adj` is present, identify the helpers and measured
-   relationships. Today's observations update memory only after today's predictions.
+   relationships. At offset zero, today's observations update memory after prediction;
+   negative offsets release earlier exact pairs only when the cutoff permits them (section 20).
 6. **Blend and price.** Check `w = W/(W + shrink_k)` and
    `basis = w × basis_local + (1 − w) × (basis_hist + cross_adj)`, using only available
    components and treating a missing prior as 0. Without local anchors, `w = 0`. Apply any
@@ -1891,7 +1902,7 @@ or enrich the complete input. See section 5.
 
 ## 14. Complete configuration reference: what controls each decision
 
-This chapter is a complete reference to the **58 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
+This chapter is a complete reference to the **59 keys in the supplied `config.toml`**. Defaults below refer to that file, not to a partially omitted configuration. Edit existing TOML sections without duplicating them. A setting changes model behavior or data selection; increasing it does not generally make prices higher, better or more accurate.
 
 The tables distinguish a parameter's effect from the conditions under which it matters. The loader and engine validate types, finite numbers and required bounds. Quoted booleans and a single string in place of the tenor list are rejected. Recommended calibration ranges remain guidance; validity does not imply predictive quality.
 
@@ -1922,7 +1933,8 @@ Auto mode selection never turns on a disabled layer. Ratio and additive historie
 
 | Key | Default | Increasing / decreasing | When it applies / constraints |
 |---|---|---|---|
-| `eex.max_stale_days` | `0` | Zero means unlimited past age. Among positive values, increasing admits older publications and may increase coverage; decreasing rejects them sooner. | Publication selection for each reference date; use a nonnegative integer. Never uses future publications. Zero does **not** mean same-day only. Same-day EEX is still required for training history. |
+| `eex.offset_days` | `0` | Nonpositive integer calendar-day offset. Publication cutoff is reference date plus offset: 0 permits T; -1 excludes T; more negative values delay evidence further. | Does not change T or tenor resolution. Applies to pricing, smoothing and release of historical exact-date pairs. Fixed backtest scenario, not a grid field. |
+| `eex.max_stale_days` | `0` | Zero means unlimited past age. Among positive values, increasing admits older publications and may increase coverage; decreasing rejects them sooner. | Age is reference date minus publication, not cutoff minus publication. Use a nonnegative integer. Zero does **not** mean same-day only. Training still requires own/EEX paired on the same original date. |
 | `eex.warn_stale_days` | `3` | Increasing delays escalation of stale-data messages to ERROR; decreasing makes the log more sensitive. | Logging only. Use a nonnegative integer. It does not reject settlements, alter prices, or fail a run by itself; `max_stale_days` controls acceptance. |
 
 ### Time zones: delivery hours, not a price adjustment
@@ -1966,7 +1978,7 @@ The supplied list is `D+1, D+2, D+3, WE, WE+1, WE+2, WE+3, BOW, W+1, W+2, W+3, W
 | `method.hist_max_age_days` | `60` | Larger permits older basis means to remain usable; smaller expires them sooner and increases reliance on today's evidence or smoothed EEX. | Positive calendar-day limit; loader requires >0. A kind/group/global mean expires after more than N days since its last valid own observation. A current group/global fallback can remain after one kind expires. |
 | `method.hist_auto_min_obs` | `10` | Larger delays evidence-based acceptance/rejection of history; smaller allows an earlier, noisier decision. Before reaching the threshold, available history is allowed. | Only controls `layers.hist="auto"`; use a nonnegative effective observation mass. Scores are separate by mode/group and decay with `ewma_halflife_days`, so this is not a raw row count. |
 
-Auto chooses additive if the target's absolute EEX price is below the floor; otherwise ratio when usable ratio anchors exist; otherwise additive when additive anchors exist; otherwise additive when only an allowed, current additive history exists; otherwise ratio. A target without usable adjustment attempts smoothed EEX; the selected mode does not transform that fallback. History learns only from original anchors with same-day EEX, after prediction; estimated output never trains the model.
+Auto chooses additive if the target's absolute EEX price is below the floor; otherwise ratio when usable ratio anchors exist; otherwise additive when additive anchors exist; otherwise additive when only an allowed, current additive history exists; otherwise ratio. A target without usable adjustment attempts smoothed EEX; the selected mode does not transform that fallback. History learns only original anchors paired with EEX of that original date: after prediction at offset zero, or through delayed release under a negative offset (section 20). Estimated output never trains the model.
 
 ### Fallback without an adjustment (`[eex_fallback]`)
 
@@ -2023,7 +2035,7 @@ is an error and prevents result writes. See [the code review](CODE_REVIEW.md) fo
 
 ### Optional post-refill shape controls
 
-All seven implemented controls are listed here to complete the 58-key inventory. Section 17 explains the objective, examples and output semantics. These numeric defaults are uncalibrated starter values.
+All seven implemented controls are listed here to complete the 59-key inventory. Section 17 explains the objective, examples and output semantics. These numeric defaults are uncalibrated starter values.
 
 | Key | Default | Meaning and effect |
 |---|---|---|
@@ -2143,8 +2155,8 @@ a nearby month. Own trades and previous estimates do not train this fallback.
 
 ### Complete windows, fixed contracts and averages
 
-Use the latest distinct publication dates in the EEX file through the reference date,
-ending at the latest snapshot accepted by `eex.max_stale_days`. These are **publication
+Use the latest distinct publication dates in the EEX file through the cutoff
+`reference_date + eex.offset_days`, ending at the latest snapshot accepted by `eex.max_stale_days`. These are **publication
 observations**, not calendar days: reusing a stale settlement on several nonpublication days
 does not increase the sample. Future publications are never used.
 
@@ -2251,7 +2263,7 @@ anchor_months = 2
 These controls do not change originals or prices with local/historical/cross adjustments.
 Price and spread windows are independent: neither must be larger than the other.
 Maximum staleness governs the latest accepted snapshot; it does not turn the windows into
-calendar-day windows. The 58 configuration keys include these five controls.
+calendar-day windows. The 59 configuration keys include these five controls.
 
 Override them for one `daily`, `refill`, `catchup`, `backtest` or `tune` execution:
 
@@ -2458,7 +2470,8 @@ evaluation across seasons, horizons, missing blocks and calendar rolls; a year c
 cannot establish adequate coverage.
 
 `pipeline_configured` in backtest includes shape after the held-out period and its aliases
-have been hidden. History continues to learn only actual originals after prediction.
+have been hidden. History learns only actual originals with contemporaneous EEX, after
+prediction at offset zero or through the delayed release described in section 20.
 CLI tune still searches the same six refill dimensions; shape settings stay fixed
 through its grid and are retained in the configuration snapshot. Comparing shape settings
 requires separate controlled runs with the same evaluation cases.
@@ -2551,7 +2564,7 @@ PARAMETER_GRID = {
 
 This creates **3 × 2 = 6** candidates. Lists form a Cartesian product, bounded by
 `MAX_TRIALS` (24 in the notebook). Omitted fields stay fixed. Paths, mapping/identity, targets,
-conventions, volume/outlier filters, ratio guards, EEX staleness and evaluation dates are
+conventions, volume/outlier filters, ratio guards, EEX availability offsets/staleness and evaluation dates are
 excluded from the grid so candidates retain a common observation universe. Grid support
 does not mean every parameter is worth optimizing or has an effect in every case.
 
@@ -2577,3 +2590,81 @@ explicitly disables local/history/cross for a controlled comparison of that bran
 shape audit and its diagnostic coherence tolerance do not change predictions. Use appropriate
 missing-block experiments and untouched later dates before extending conclusions to actual
 unknown prices; tracking does not remove those model-validation limits.
+
+## 20. Which EEX publication is available for each reference date?
+
+`[eex].offset_days` is a nonpositive integer, default **0**. Its Python field is
+`Config.eex_offset_days`; the CLI override is `--eex-offset-days`. For reference date T:
+
+```text
+cutoff = T + offset_days calendar days
+publication = latest supplied EEX publication with date <= cutoff
+age = T - publication
+```
+
+The selected publication must also pass `max_stale_days`, measured against **T**, not the
+cutoff. Zero maximum age in the TOML still means unlimited. If no publication is admissible,
+EEX is unavailable; unchanged own observations and permitted reconstruction retain their
+normal behavior. A permitted EEX publication can still lack a particular delivery contract.
+
+| Reference T | Offset | Cutoff | Example selection |
+|---|---:|---|---|
+| Wed 2026-10-07 | 0 | 2026-10-07 | October 7 if supplied; otherwise latest earlier publication |
+| Wed 2026-10-07 | -1 | 2026-10-06 | October 6 or earlier, even if October 7 exists |
+| Mon 2026-10-05 | -1 | Sun 2026-10-04 | Friday October 2 if no weekend publication; age is three days |
+| Thu 2026-10-01 | -1 | 2026-09-30 | September EEX may price October's targets; M+1 still means November |
+
+This is not an offset in trading days or in available file rows. Positive offsets are
+rejected. An exact match to the cutoff date is not required. A maximum stale age of two
+days rejects the Friday-to-Monday example; moving the cutoff does not make that quote newer.
+
+The cutoff applies to direct EEX selection, reconstructed references and the endpoint of
+both fallback windows. A five-publication price window and nine-publication spread window
+use distinct publications no later than the cutoff. Their complete-window rules remain;
+they do not become five/nine calendar-day windows. Target dates, time zones, hours and the
+monthly cascade's target calendar remain anchored to **T**, not to the cutoff or `eex_asof`.
+
+### Own history, correlation and CROSS under a delay
+
+At offset zero, learning retains the normal order: predict T first, then update with
+admissible original Own/EEX pairs from T. At a negative offset, historical pairs are released
+chronologically before predicting T, only when their original date h satisfies both
+`h<T` and `h<=cutoff`. The pair is always **Own_h with EEX_h**. No pair is invented for a
+date lacking contemporaneous EEX, and estimates never train the model. Date h remains the
+observation date for expiry and covariance decay; releasing an old pair does not rejuvenate it.
+
+For example, on Wednesday with offset -1, Tuesday's Own/EEX pair may be used; Wednesday's
+pair may not. With offset -2, Tuesday's pair waits until Thursday. Mean estimates, hist-auto diagnostics
+and covariance state receive only the permitted earlier evidence. LOCAL can still compare
+Wednesday's observed anchors with the accepted older EEX to estimate Wednesday's gaps.
+
+**CROSS has an additional restriction:** current surprises require `eex_asof == T`. With a
+negative offset that condition cannot hold, so there is no usable current CROSS adjustment.
+Its relationships can still learn delayed exact-date pairs; learned local correlation weights
+can also be used. This is an explicit limitation of the current cross model, not a claim
+that cross-market information ceases to exist.
+
+### Running, auditing and comparing the policy
+
+`daily`, `refill`, `catchup`, `backtest` and `tune` accept `--eex-offset-days 0` or `-1`
+(and other nonpositive integers). The notebook's `EEX_OFFSET_DAYS=None` uses the selected
+config; an integer overrides the dataset copy without rewriting the TOML. Availability is
+fixed within a grid. It is excluded from both the six-field CLI grid and the 29-field
+experiment grid; compare different offsets in separate, clearly labeled experiments.
+Use the same intended evaluation dates and inspect the actual paired sample and coverage:
+the stricter policy can remove EEX-evaluable observations, so raw scores need not be comparable.
+
+Filled rows and LOO records expose `eex_offset_days`, `eex_cutoff_date`, and `eex_asof`.
+Enriched engine traces use the same names with `curve_` prefixed; smoothing JSON records the
+cutoff too. Logs distinguish requested reference date, latest allowed date and selected
+publication. These fields explain whether an older quote was required by policy or simply
+the latest available, without changing the row's reference date.
+
+Catchup does not silently recalculate completed results. In its requested active date/curve/
+target scope it rejects existing filled or enriched rows with another offset; absent or
+blank metadata from older files means zero. Explicit refill with the intended offset, or a
+separate output folder, resolves the mismatch. Outside-scope rows are not grounds to block.
+
+This availability model uses the publication-date column in supplied CSVs. It has no live
+publication clock, intraday release timestamps or historical revision archive. The offset
+expresses the chosen operational convention; it does not establish actual historical visibility.

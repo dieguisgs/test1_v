@@ -64,6 +64,7 @@ class EexFallback:
         self.spread_window = cfg.fallback_spread_window
         self.anchor_months = cfg.fallback_anchor_months
         self.max_stale_days = cfg.max_stale_days
+        self.eex_offset_days = getattr(cfg, "eex_offset_days", 0)
         self._dates = tuple(book.trade_dates)
         self._pricers: dict[date, Pricer] = {}
         self._quotes: dict[tuple, tuple[float, str] | None] = {}
@@ -154,7 +155,8 @@ class EexFallback:
         return self._results[key]
 
     def _price(self, day: date, period: Period) -> FallbackResult | None:
-        asof = self.book.asof(day, self.max_stale_days)
+        cutoff = self.book.cutoff_date(day, self.eex_offset_days)
+        asof = self.book.available_asof(day, self.max_stale_days, self.eex_offset_days)
         if asof is None:
             return None
         first = day.replace(day=1)
@@ -179,6 +181,7 @@ class EexFallback:
                 value, previous = after, current
         trace = {
             "reference_date": day.isoformat(), "eex_asof": asof.isoformat(),
+            "eex_cutoff_date": cutoff.isoformat(), "eex_offset_days": self.eex_offset_days,
             "target": _period_trace(period), "price_method": self.price_method,
             "price_window": self.price_window, "ewma_halflife": self.halflife,
             "spread_window": self.spread_window, "anchor_months": self.anchor_months,

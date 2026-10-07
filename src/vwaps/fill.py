@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
@@ -167,8 +168,9 @@ class CurveFiller:
         if start > end:
             raise ValueError("The start date cannot be later than the end date")
         warm = start - timedelta(days=cfg.warmup_days) if cfg.warmup_days else date.min
-        log.info("Engine %s -> %s | mode=%s | cross=%s | warmup=%s",
-                 start, end, cfg.basis_mode, cfg.layer_cross,
+        EexBook.cutoff_date(start, cfg.eex_offset_days)
+        log.info("Engine %s -> %s | mode=%s | cross=%s | EEX offset=%d | warmup=%s",
+                 start, end, cfg.basis_mode, cfg.layer_cross, cfg.eex_offset_days,
                  f"{cfg.warmup_days} days (limited history)" if cfg.warmup_days else "all original history")
         if cfg.warmup_days:
             log.warning("Limited warmup: daily and a longer refill may use different history")
@@ -187,16 +189,52 @@ class CurveFiller:
 
         no_eex: dict[str, list[date]] = {}
         filled, cons, loo_rows, errors = [], [], [], []
-        for day in sorted(days):
+
+        def prepare(engine: CurveFiller, current_series: list[Series], day: date) -> dict:
             preps = {}
-            for s in series:  # A curve failure does not stop the other curves.
+            for s in current_series:  # A curve failure does not stop the other curves.
                 try:
-                    preps[s.key] = self._prep(s, day)
+                    preps[s.key] = engine._prep(s, day)
                 except Exception:
                     errors.append({"reference_date": day, "product": s.m.product,
                                    "region": s.m.region, "unit": s.m.unit, "phase": "prepare"})
                     log.exception("%s %s: error preparing the day; skipping this curve", day, s.name)
+            return preps
+
+        trainer = None
+        training_index = 0
+        training_days = []
+        if cfg.eex_offset_days < 0:
+            # The training clock is the observation's original date h. Release
+            # each h once, only when same-date EEX could be known under today's
+            # cutoff. Never train own_T against an older EEX snapshot.
+            trainer = CurveFiller(replace(cfg, eex_offset_days=0), self.vwaps, self.maps, self.books)
+            trainer.cross = self.cross
+            training_days = sorted({day for s in series for day in s.own_by_day if warm <= day <= end})
             for s in series:
+                if s.book is not None:
+                    # Prediction clones share this read-through cache; cloning
+                    # must not rebuild smoothing windows for every output day.
+                    s.fallback = EexFallback(s.book, s.hfn, cfg)
+        for day in sorted(days):
+            if trainer is not None and day < start:
+                continue
+            cutoff = EexBook.cutoff_date(day, cfg.eex_offset_days)
+            if trainer is not None:
+                while (training_index < len(training_days)
+                       and training_days[training_index] <= cutoff and training_days[training_index] < day):
+                    historical_day = training_days[training_index]
+                    training_preps = prepare(trainer, series, historical_day)
+                    trainer._update(series, historical_day, training_preps)
+                    training_index += 1
+                # Expiry for a forecast uses T, while delayed training retains
+                # its own historical clock h. Skill and covariance are read-only
+                # during prediction; only histories require independent copies.
+                current_series = [replace(s, hist=deepcopy(s.hist)) for s in series]
+            else:
+                current_series = series
+            preps = prepare(self, current_series, day)
+            for s in current_series:
                 if not s.output or day < start or s.key not in preps:
                     continue
                 if output_keys is not None and (day, s.key) not in output_keys:
@@ -222,8 +260,8 @@ class CurveFiller:
                     log.exception("%s %s: error filling the curve; skipping this curve", day, s.name)
                     continue
                 filled += rows
-                log.info("%s %s | anchors=%d | EEX=%s | methods=%s",
-                         day, s.name, len(preps[s.key].anchors), preps[s.key].asof,
+                log.info("%s %s | anchors=%d | EEX cutoff=%s offset=%d latest=%s | methods=%s",
+                         day, s.name, len(preps[s.key].anchors), cutoff, cfg.eex_offset_days, preps[s.key].asof,
                          dict(Counter(r["estimation_method"] for r in rows)))
                 asof = preps[s.key].asof
                 if s.book is not None and asof is None:
@@ -231,11 +269,17 @@ class CurveFiller:
                 elif asof is not None and asof != day:
                     age = (day - asof).days
                     lvl = log.error if age >= cfg.warn_stale_days else log.warning
-                    lvl("%s %s: EEX for %s is unavailable; using EEX from %s (%d days earlier)",
-                        day, s.name, day, asof, age)
-            self._update(series, day, preps)
+                    if cfg.eex_offset_days < 0:
+                        lvl("%s %s: EEX cutoff %s (offset %d); latest allowed publication %s "
+                            "is %d calendar days before the reference date",
+                            day, s.name, cutoff, cfg.eex_offset_days, asof, age)
+                    else:
+                        lvl("%s %s: EEX for %s is unavailable; using EEX from %s (%d days earlier)",
+                            day, s.name, day, asof, age)
+            if trainer is None:
+                self._update(series, day, preps)
         for name, ds in no_eex.items():
-            log.warning("%s: no EEX settlement available yet from %s to %s (%d days): "
+            log.warning("%s: no EEX settlement within cutoff/age limits from %s to %s (%d days): "
                         "using own VWAPs (contract reconstruction enabled: %s)",
                         name, ds[0], ds[-1], len(ds), cfg.layer_arbitrage)
         return RunResult(pd.DataFrame(filled), pd.DataFrame(cons), pd.DataFrame(loo_rows), errors)
@@ -296,7 +340,8 @@ class CurveFiller:
         cfg = self.cfg
         for hist in s.hist.values():
             hist.expire(day, cfg.hist_max_age_days)
-        quotes, asof = s.book.quotes(day, cfg.max_stale_days) if s.book is not None else ({}, None)
+        quotes, asof = (s.book.available_quotes(day, cfg.max_stale_days, cfg.eex_offset_days)
+                       if s.book is not None else ({}, None))
         eex = Pricer(quotes, s.hfn)
         own = self._own_quotes(day, s.own_by_day.get(day), s.hfn)
         candidates, bad, rejected = [], [], set()
@@ -443,7 +488,8 @@ class CurveFiller:
                 "configured_basis_mode": cfg.basis_mode,
                 "own_vwap": q.vwap if q else math.nan, "own_volume": q.volume if q else math.nan,
                 "eex_settle": r[0] if r else math.nan, "eex_method": r[1] if r else "",
-                "eex_asof": p.asof, "basis": math.nan, "basis_local": math.nan,
+                "eex_asof": p.asof, "eex_cutoff_date": EexBook.cutoff_date(day, cfg.eex_offset_days),
+                "eex_offset_days": cfg.eex_offset_days, "basis": math.nan, "basis_local": math.nan,
                 "basis_hist": math.nan, "cross_adj": math.nan, "local_weight": math.nan,
                 "anchors": "", "cross_from": "",
                 "eex_fallback_trace": "",
@@ -582,7 +628,9 @@ class CurveFiller:
                     "region": s.m.region, "unit": s.m.unit, "tenor": a.tenor,
                     "kind": a.period.kind, "group": a.period.group, "own": a.own,
                     "volume": a.volume, "n_other_anchors": len(others),
-                    "configured_basis_mode": cfg.basis_mode}
+                    "configured_basis_mode": cfg.basis_mode,
+                    "eex_asof": p.asof, "eex_cutoff_date": EexBook.cutoff_date(day, cfg.eex_offset_days),
+                    "eex_offset_days": cfg.eex_offset_days}
             preds = {"eex": a.eex}
             applied_modes = {"eex": ""}
             for m in MODES:

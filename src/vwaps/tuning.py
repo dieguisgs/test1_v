@@ -41,6 +41,7 @@ EXPERIMENT_TUNABLE_FIELDS = (*TUNABLE_FIELDS,
     "shape_original_weight", "shape_coherence_tolerance",
 )
 PAIR_KEYS = ["reference_date", *IDENTITY_COLUMNS, "tenor"]
+EEX_POLICY_COLUMNS = ["eex_asof", "eex_cutoff_date", "eex_offset_days"]
 
 
 @dataclass
@@ -119,7 +120,8 @@ def _paired(loo: pd.DataFrame, dates: list[date], label: str) -> pd.DataFrame:
     frame = frame[frame["reference_date"].isin(dates)]
     outputs = {}
     for method in ("eex", "pipeline_configured"):
-        rows = frame[frame["method"] == method][[*PAIR_KEYS, "pred", "own"]].copy()
+        trace = [name for name in EEX_POLICY_COLUMNS if name in frame] if method == "eex" else []
+        rows = frame[frame["method"] == method][[*PAIR_KEYS, "pred", "own", *trace]].copy()
         if (rows.empty and method == "eex") or rows.duplicated(PAIR_KEYS).any():
             raise ValueError(f"{label}: empty or duplicate {method} observation keys")
         for field in ("pred", "own"):
@@ -159,7 +161,7 @@ def _check_holdout_coverage(cfg: Config, vw: pd.DataFrame, maps: list[ProductMap
             continue
         key = (day, curve)
         if key not in pricers:
-            quotes, _ = book.quotes(day, cfg.max_stale_days)
+            quotes, _ = book.available_quotes(day, cfg.max_stale_days, offset_days=cfg.eex_offset_days)
             pricers[key] = Pricer(quotes, hours_fn(mapping.hours, mapping.timezone))
         period = resolve_tenor(str(tenor), day, cfg.day_convention, cfg.weekend_offset)
         if period is not None:
@@ -285,7 +287,8 @@ def tune_parameters(
         notify("trial_started", trial_id=trial_id, parameters=parameters)
         available = evaluate(parameters, calibration_dates, f"Calibration trial {trial_id}")
         notify("calibration_evaluated", trial_id=trial_id, parameters=parameters, available=available)
-        evidence = available[[*PAIR_KEYS, "own", "eex_pred"]].set_index(PAIR_KEYS).sort_index()
+        trace = [name for name in EEX_POLICY_COLUMNS if name in available]
+        evidence = available[[*PAIR_KEYS, "own", "eex_pred", *trace]].set_index(PAIR_KEYS).sort_index()
         if baseline is None:
             baseline = evidence
         elif not baseline.equals(evidence):
@@ -332,6 +335,9 @@ def tune_parameters(
     metadata = {
         "objective": "mean_per_curve_mae_model_over_mae_eex",
         "evaluated_method": "pipeline_configured", "baseline": "eex",
+        "eex_offset_days": cfg.eex_offset_days,
+        "eex_availability_policy": "latest_publication_on_or_before_reference_date_plus_calendar_day_offset",
+        "eex_staleness_origin": "reference_date",
         "parameter_grid": {field: list(values) for field, values in parameter_grid.items()},
         "selection_scope": "maximum calibration coverage, then best common-case score within the supplied finite grid",
         "accuracy_scope": "intersection_of_predictions_from_all_calibration_candidates",

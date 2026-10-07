@@ -52,6 +52,7 @@ deliberately favors those model families; it is not a neutral market benchmark.
 | `DATA_MODE` | `"synthetic"` by default; change to `"real"` on the computer with your files. |
 | `VWAP_PATH` | Optional real input override. `None` uses the input configured in the TOML. A relative override is relative to the project root. |
 | `START_DATE`, `END_DATE` | ISO dates such as `"2026-09-01"`, inclusive. `None` uses the dataset's date bounds. |
+| `EEX_OFFSET_DAYS` | `None` retains `[eex].offset_days` in both synthetic and real mode. `0` permits a publication on the reference date; `-1` permits only T-1 calendar day or earlier. Any override must be a nonpositive integer. |
 | `VALIDATION_DAYS` | Number of latest eligible observation dates reserved for validation; the notebook example uses **5**. These are observation dates, not a five-calendar-day duration. |
 | `MAX_TRIALS` | Maximum Cartesian grid size; the example uses **24**. A larger grid fails before starting the run. |
 | `DEMO_SEED`, `DEMO_PERIODS` | Reproducible synthetic generation; default seed 7 and 30 periods. They do not affect real mode. |
@@ -66,6 +67,32 @@ deliberately favors those model families; it is not a neutral market benchmark.
 history. In real mode the notebook preserves your configuration and rejects a nonzero value;
 it does not silently rewrite it. Earlier history can precede `START_DATE`: the date range
 controls evaluation dates, not an instruction to discard the available historical input.
+
+### Compare a same-date or previous-date EEX policy
+
+Set `EEX_OFFSET_DAYS=0` for a run that may use EEX published on T, or `-1` to exclude T even
+when the file contains it. The cutoff is `T + offset`, in **calendar days**. On Monday, -1
+means Sunday; the latest available publication may therefore be Friday. Its stale age is
+three days relative to Monday, not two relative to Sunday. The configured age limit still
+applies (`max_stale_days=0` means unlimited). Target tenors continue to resolve from T.
+
+This is a fixed scenario **outside `PARAMETER_GRID`**, not a thirtieth tunable field. Run the
+notebook twice, for example with `EXPERIMENT_NAME="vwaps-offset-0"` and `"vwaps-offset-minus-1"`,
+keeping the same intended dates and grid. The setup cell prints the effective availability
+policy; the config snapshot and tuning metadata record it, and paired prediction files carry
+`eex_offset_days`, `eex_cutoff_date`, `eex_asof` when prediction logging is enabled. The raw
+EEX benchmark, refill and complete averaging windows all obey the selected cutoff.
+
+Historical Own_h/EEX_h pairs are released with delay only when `h<T` and `h<=cutoff`; their
+original dates still govern expiry/decay. LOCAL can use current own anchors against the older
+permitted reference. **Current CROSS adjustment is unavailable with negative offsets**, since
+its surprise requires same-day EEX; cross relationships can still learn exact historical pairs.
+HIST and learned local correlation weights remain usable when sufficient evidence exists.
+
+Changing availability can change the evaluable sample and coverage as well as the reference
+price. A lower score in another scenario is not automatically better: inspect common held-out
+keys and coverage before comparing. This is a date-level convention over supplied CSVs,
+not an intraday publication clock or reconstruction of historical revision vintages.
 
 ## 3. Which parameters can be compared?
 
@@ -123,7 +150,7 @@ example values are candidates to investigate, not recommendations established wi
 it is a controlled branch comparison, not a comparison of the full production setup.
 
 Every omitted field remains fixed. Paths, mapping/identity, targets, delivery conventions,
-volume/outlier filters, ratio safety guards, EEX staleness and evaluation dates cannot be
+volume/outlier filters, ratio safety guards, EEX availability offsets/staleness and evaluation dates cannot be
 grid fields. Changing those could change which observations are being compared. An unsupported
 key is an error. To study such a change, design a separate evaluation with an explicitly
 comparable truth universe; do not treat unlike sample sets as the same competition.
@@ -215,6 +242,8 @@ and [MLflow Tracking guide](https://mlflow.org/docs/latest/ml/tracking/).
    **`calibration.overall.score`** to the run table. First retain the highest coverage; among
    those rows, the lowest score wins. The child tag **`vwaps.selected` = `true`** identifies
    the actual winner. For an exact tie, check `trial_id` and the grid order in the report.
+   The fixed **`eex_offset_days`** parameter is recorded on the parent and every child;
+   display or filter it to distinguish offset 0 and -1 scenarios before comparing runs.
 3. Select child runs to compare their parameter and metric values. Inspect
    `calibration.overall.n_paired` and `calibration.overall.n_missing` as well as the score.
    **`validation.*` metrics appear only for the selected child and the parent**: absent
@@ -246,6 +275,7 @@ DATA_MODE = "real"
 VWAP_PATH = r"C:\Data\VWAPS\observations.xlsx"  # Or None to use config.toml.
 START_DATE = "2026-08-10"
 END_DATE = "2026-10-06"
+EEX_OFFSET_DAYS = -1  # Example policy: exclude same-date EEX; None retains the TOML.
 VALIDATION_DAYS = 5
 EXPERIMENT_NAME = "vwaps-real-first-review"
 ```
@@ -280,12 +310,17 @@ Keep enough earlier history for the methods you want to compare.
 
 ## 8. Verified execution
 
-On Windows with Python **3.14.2** and MLflow **3.17.0**, the full test suite passed **623 tests**, with one upstream
-MLflow/SQLAlchemy deprecation warning. The notebook was also executed through the actual
-`.venv` Jupyter kernel with its default six-combination grid: one parent and six completed
-child runs, **25 calibration dates / 290 paired cases**, and **5 validation dates / 58 cases**
-for the selected candidate only. Report artifact upload/download, an HTTP 200 response from
-the UI, and retention of experiment records after stopping/restarting the service were checked.
+On Windows with Python **3.14.2** and MLflow **3.17.0**, the complete suite passed **715 tests**
+in 44.70 seconds, with one upstream MLflow/SQLAlchemy deprecation warning. The notebook was
+executed through the actual `.venv` Jupyter kernel with both the default offset **0** and an
+explicit offset **-1**. The -1 run completed all six candidate children under one parent,
+with **25 calibration dates / 290 paired cases** and **5 validation dates / 58 cases** for
+the selected candidate only. Saved paired-prediction CSVs were checked to confirm every
+accepted publication satisfied **`eex_asof <= eex_cutoff_date = T - 1 calendar day`**.
+
+The offset -1 execution also verified an HTTP 200 response from the local UI and clean
+service shutdown. Earlier default-offset checks verified report artifact upload/download
+and retention of experiment records after stopping/restarting the service.
 
 These checks establish the tested local workflow, not predictive accuracy on unavailable
 real own data, the optimality of synthetic winning parameters, or runtime verification on

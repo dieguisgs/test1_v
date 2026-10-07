@@ -179,9 +179,13 @@ def test_excel_override_preserves_originals_and_completes_missing_prices(project
     assert (added["Unnamed: 0"] == "").all()
 
 
-def test_daily_matches_refill_and_repeated_commands_preserve_history(project):
+@pytest.mark.parametrize("offset", [0, -1, -2])
+def test_daily_matches_refill_and_repeated_commands_preserve_history(project, offset):
     refill_config, _ = project("refill")
     daily_config, raw = project("daily")
+    for path in (refill_config, daily_config):
+        with path.open("a", encoding="utf-8") as file:
+            file.write(f"\n[eex]\noffset_days = {offset}\n")
     assert command(refill_config) == 0
     daily_output = daily_config.parent / "output"
     for day in DAYS:

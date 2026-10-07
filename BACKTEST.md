@@ -77,6 +77,31 @@ least 22 eligible observation dates, including at least two calibration dates wi
 common to all candidates, and usable holdout EEX. The one-day M+1/Q+2 experiment cannot tune.
 Tune writes reports and a proposed configuration patch; it does not apply it automatically.
 
+### EEX availability is a fixed evaluation scenario
+
+`eex.offset_days=0` permits publications through the reference date T; `-1` restricts them
+to T-1 calendar day or earlier. Choose it in the TOML, use `--eex-offset-days -1` in `backtest`
+or `tune`, or set `EEX_OFFSET_DAYS=-1` in the experiment notebook. It is not a candidate field
+in either grid. The same cutoff applies to the raw EEX benchmark, pipeline references and
+fallback price/spread windows. Delivery targets still resolve from T.
+
+Historical learning with a negative offset releases original Own_h/EEX_h pairs only when
+`h<T` and `h<=T+offset_days`, preserving h for decay/expiry. It never learns a stale-date pair.
+LOCAL and HIST remain usable; current CROSS surprises require same-day EEX and therefore
+contribute no current cross adjustment with negative offsets, even if `layer_cross=True`.
+Cross covariances can still learn exact historical pairs; local correlation weights remain usable.
+
+For Monday with offset -1, the cutoff is Sunday. A Friday publication is three days old
+relative to Monday; a `max_stale_days=2` limit rejects it. Zero maximum age remains unlimited.
+Audit `eex_offset_days`, `eex_cutoff_date` and `eex_asof` in LOO/paired prediction files and
+the availability policy recorded in tuning metadata.
+
+Compare offset 0 and -1 as separate, labeled runs with the same intended dates and masking.
+Do not infer that a lower score proves a better model: the policy can change the benchmark
+and which own observations are EEX-evaluable. Report coverage and common observation keys;
+use an explicitly matched comparison before attributing differences to forecast quality.
+CSV publication dates provide a date-level convention, not historical intraday/revision visibility.
+
 ## 4. What hiding one period can establish
 
 Current leave-one-out evaluation hides one own delivery period and **all equivalent aliases**
@@ -143,7 +168,7 @@ to optimize every setting or vary observation filters inside a shared ranking.
 | Own history | `ewma_halflife_days`, `hist_max_age_days`, `hist_auto_min_obs`, `layers.hist` |
 | EEX fallback | `eex_fallback.price_method`, `price_window`, `ewma_halflife`, `spread_window`, `anchor_months` |
 | Relationships | `layers.correlation`, `correlation.halflife_days`, `correlation.prior_obs`; `layers.cross`, `cross.min_corr`, `cross.min_obs`, `cross.halflife_days` |
-| Availability and execution | `eex.max_stale_days`, `layers.local`, `layers.arbitrage`, `run.warmup_days` |
+| Availability and execution | `eex.offset_days`, `eex.max_stale_days`, `layers.local`, `layers.arbitrage`, `run.warmup_days` |
 | Meaning and scope | Targets, identity mapping, units, schema aliases and calendar conventions: establish these correctly, rather than fitting them to reduce errors |
 
 Increasing history, reach or complexity is not automatically an improvement. Freeze data,

@@ -18,7 +18,7 @@ Cómo se genera, cada día, la curva completa de un producto (por ejemplo DE Bas
 
 ## Qué necesitas configurar y qué puedes dejar con los valores iniciales
 
-Las 58 entradas de `config.toml` no son 58 parámetros que debas optimizar: 19 son rutas,
+Las 59 entradas de `config.toml` no son 59 parámetros que debas optimizar: 19 son rutas,
 nombres de columnas y zonas horarias. Para un primer uso, basta con revisar las rutas,
 el mapping de identidades, los tenors objetivo y mantener el modo `auto`. Las capas
 `correlation`, `cross` y `arbitrage` permanecen desactivadas. Los controles avanzados se documentan
@@ -124,9 +124,10 @@ dentro de los casos que utilizan EEX.
 | 9. Fuera del alcance activado | Sin mapeo, `off` o `eex_file` vacío | No genera su curva estimada; conserva originales del enriquecido solicitado | Revisar mapping. Un tenor fuera de targets tampoco se crea si falta |
 
 Una ruta EEX **asignada pero sin datos** mantiene activa la curva: puede usar originales y, si está activado,
-arbitraje. **Sin fuente asignada**, queda excluida. Si no hay publicación EEX de hoy, puede
-utilizarse la última anterior según `[eex]`, nunca una futura. Se registra antigüedad y ese
-día no entrena memoria con esa referencia antigua.
+arbitraje. **Sin fuente asignada**, queda excluida. Se usa la última publicación hasta
+`T + eex.offset_days` según `[eex]`, nunca una posterior. La antigüedad se mide desde T.
+No se entrena mezclando el propio de hoy con esa referencia antigua; sí pueden liberarse
+con retraso parejas exactas de fechas anteriores. La sección 20 detalla esta política.
 
 El strip pondera por horas y requiere cobertura contigua completa. El residuo calcula la
 cola: `(precio_padre×horas_padre−valor_cabeza)/horas_cola`. Una cola pequeña amplifica errores
@@ -147,8 +148,10 @@ Los diagnósticos reportan inconsistencias sin alterar originales para forzar ag
    en cualquier otro caso → ratio.
 5. **Ajuste.** Combina local, historia permitida y cross habilitado usando w. Escribe precio,
    origen, método y evidencias. El relleno inicial no cambia originales; shape solo puede ajustar su precio de curva con permiso explícito.
-6. **Aprendizaje posterior.** Después de predecir la fecha, actualiza memorias con originales
-   admisibles y EEX de esa misma fecha. Nunca aprende de estimaciones.
+6. **Aprendizaje y disponibilidad.** Con offset cero, aprende parejas propias/EEX de la misma
+   fecha después de predecir. Con offset negativo, libera parejas exactas anteriores antes
+   de predecir, solo si su fecha precede a T y no supera el corte. Nunca aprende de estimados
+   ni mezcla propios de hoy con EEX atrasado. Véase la sección 20.
 
 Por defecto, un ancla ratio necesita `abs(EEX)>=1`, `Own/EEX>0` y `abs(Own/EEX−1)<=1`.
 Así, −10 frente a −12 puede servir; 2 frente a 0, propio cero o signos opuestos no. Una
@@ -493,8 +496,9 @@ Con `w=0`, `basis=4`, precio **104**. Salida:
 `estimated / eex+hist / additive_history`; `curve_basis_hist=4`,
 `curve_basis_local` vacío, `curve_local_weight=0`.
 
-La memoria se formó con pares originales Own/EEX de la misma fecha, después de predecir cada
-día anterior. Su EWMA aprende diferencias en días observados; caduca por días naturales.
+La memoria se formó con pares originales Own/EEX de la misma fecha: después de predecir con
+offset cero, o cuando se liberan parejas exactas anteriores con offset negativo. La EWMA
+aprende diferencias en días observados; caduca según sus fechas originales, en días naturales.
 **Histórico +4 sin EEX objetivo no produce 4 ni 104**: falta el nivel al que sumarlo. No se
 arrastra el último precio. Sin historia utilizable, intenta cross si está habilitado y tiene
 evidencia; sin componentes, suavizado EEX. Sin EEX, solo queda reconstrucción opcional o missing.
@@ -867,9 +871,11 @@ distintos; cruzando por fechas no hay ambigüedad.
 
 ### Paso 1 — Curva de EEX del día
 
-- Se toman los settlements de EEX del día T.
-- **Si EEX aún no ha publicado T**, se usa el último día publicado y se registra en el log:
-  `EEX for 2026-10-01 is unavailable; using EEX from 2026-09-29 (2 days earlier)`.
+- Se calcula `corte = T + eex.offset_days` en días naturales; cero es el valor por defecto.
+- Se usa la última publicación EEX hasta ese corte, respetando la antigüedad medida desde T.
+  El corte es un límite, no exige una publicación exacta en esa fecha. El log informa T,
+  corte, publicación elegida y antigüedad. Por ejemplo, para el 1 de octubre con offset -1
+  se excluye el día 1; si falta el 30 de septiembre, puede utilizarse el 29, con dos días de antigüedad.
   A partir de `warn_stale_days` días de antigüedad el aviso pasa a ERROR. Ese nivel del log no
   convierte por sí solo la ejecución en fallida; `max_stale_days` decide si se admite la curva.
 - Se añaden fijaciones de contratos Day ya entregados dentro de los 45 días previos a la fecha
@@ -1101,12 +1107,13 @@ la nueva media es +2.133934 en unidades de precio. Aplicada sola a EEX = 150 da
 `150 + 2.133934 = 152.133934`, no `153.200901`: ese último resultado pertenecía al ejemplo
 porcentual. Esta separación de unidades se mantiene también en el modo auto.
 
-**Orden exacto de aprendizaje.** Antes de calcular un día se caducan las medias antiguas y
-se preparan las dos listas de anclas. Se selecciona el modo de cada hueco y se predice usando
-solo memoria anterior. Después se compara, para cada modo y grupo, la predicción histórica
-con EEX sin corregir sobre las anclas admisibles de ese modo; se actualizan sus puntuaciones
-de `hist = auto` y sus relaciones de sorpresas. Por último se actualizan ambas EWMA con las
-anclas originales del día, siempre que EEX sea de ese mismo día. La primera observación de
+**Orden exacto de aprendizaje.** Con `eex.offset_days=0`, antes de calcular se caducan las
+medias y se preparan ambas listas de anclas. Se predice cada hueco usando solo memoria anterior.
+Después se compara, para cada modo/grupo, la predicción histórica y el EEX exacto de la misma
+fecha sobre originales admisibles; se actualizan hist-auto, relaciones de sorpresas y ambas EWMA.
+Con offset negativo, antes de predecir T se liberan cronológicamente parejas exactas anteriores
+propio/EEX con `h<T` y `h<=T+offset_days`. Para decaimiento y caducidad se utiliza su fecha h,
+no la fecha posterior en que se libera. No se aprende con propio de hoy y EEX antiguo. La primera observación de
 una media la inicializa; las siguientes aplican α. Este aprendizaje de ambos modos ocurre
 aunque ese día los huecos hayan utilizado solo uno, y también al forzar ratio o additive.
 
@@ -1323,7 +1330,7 @@ resumen o `status`.
 
 ## 6. Parámetros (`config.toml`)
 
-Resumen de controles principales. La **sección 14 detalla las 58 claves de config.toml**,
+Resumen de controles principales. La **sección 14 detalla las 59 claves de config.toml**,
 incluidos aliases, zonas horarias, sensibilidad, condiciones de uso y restricciones.
 
 **Qué capas se usan** (`[layers]`). Así se configura la ejecución sin tocar código:
@@ -1345,6 +1352,7 @@ incluidos aliases, zonas horarias, sensibilidad, condiciones de uso y restriccio
 | | `eex_curves_dir` | `../eex_scraper/output/curves/POWER` | Raíz de las curvas de EEX | |
 | | `output_dir` | `output` | Salida | |
 | `eex` | `max_stale_days` | 0 (sin límite) | Antigüedad máxima aceptada del EEX | Si se pone N > 0 y EEX es más viejo, ese día no usa EEX |
+| | `offset_days` | 0 | Corte de publicación igual a T más este offset no positivo en días naturales | -1 excluye T; no desplaza fechas de entrega |
 | | `warn_stale_days` | 3 | Desde aquí el aviso es ERROR | |
 | `timezones` | por área | Europe/Berlin | Solo para el borrador del mapeo | |
 | `targets` | `tenors` | lista completa | Qué tenors forman la curva | |
@@ -1732,6 +1740,7 @@ o `missing`, aunque su precio proceda de un alias de un contrato propio ya obser
 | `curve_eex_settle` | Precio EEX del periodo objetivo, directo o construido |
 | `curve_eex_method` | Método exact/strip/residual de la referencia EEX. Si el respaldo falla y acaba en arbitraje, conserva ese método si había referencia; sin ella, usa el método de arbitraje. La construcción final está en `estimation_method=contract_*` |
 | `curve_eex_asof` | Fecha de la curva EEX seleccionada; permite medir su antigüedad |
+| `curve_eex_offset_days`, `curve_eex_cutoff_date` | Offset aplicado y última fecha de publicación admitida; no sustituyen la referencia ni el calendario de tenors |
 | `curve_eex_fallback_trace` | JSON completo del respaldo suavizado: precios, pesos, publicaciones y cascada mensual; vacío fuera de esa rama |
 | `curve_basis` | Ajuste EEX previo a shape, después del límite ratio; shape tiene un delta aditivo separado |
 | `curve_basis_local` | Ajuste calculado con las anclas de hoy |
@@ -1781,7 +1790,8 @@ Para una fila estimada de `M+4`, la revisión se puede hacer en este orden:
 5. **Historia y cross.** Reconstruye la memoria con originales anteriores y EEX contemporáneo,
    expirando cada media según `hist_max_age_days`. Comprueba que `hist = off/auto` permite el
    respaldo registrado y, si aparece `curve_cross_adj`, qué productos y relaciones lo aportaron.
-   La actualización con los datos del día ocurre después de predecir ese día.
+   Con offset cero se aprende después de predecir; con offset negativo se liberan parejas
+   exactas anteriores únicamente cuando el corte lo permite (sección 20).
 6. **Mezcla y precio.** Verifica `w = W/(W + shrink_k)` y
    `basis = w × basis_local + (1 − w) × (basis_hist + cross_adj)`, interpretando un respaldo
    ausente como 0 y usando solo componentes disponibles. Sin anclas locales, `w = 0`.
@@ -1916,7 +1926,7 @@ ya procesados o enriquecer todo el input. Consulta la sección 5.
 
 ## 14. Referencia completa de configuración: qué controla cada decisión
 
-Este capítulo documenta las **58 claves del `config.toml` entregado**. Los valores por defecto se refieren a ese archivo, no a una configuración parcialmente omitida. Edita las secciones TOML existentes sin duplicarlas. Cambiar un parámetro modifica el modelo o la selección de datos; aumentarlo no implica que el precio suba ni que la estimación mejore.
+Este capítulo documenta las **59 claves del `config.toml` entregado**. Los valores por defecto se refieren a ese archivo, no a una configuración parcialmente omitida. Edita las secciones TOML existentes sin duplicarlas. Cambiar un parámetro modifica el modelo o la selección de datos; aumentarlo no implica que el precio suba ni que la estimación mejore.
 
 Las tablas separan el efecto del parámetro de las condiciones en las que interviene. El cargador y el motor validan tipos, números finitos y límites obligatorios. Se rechazan booleanos entre comillas y una cadena única en lugar de la lista de tenors. Los rangos de calibración recomendados siguen siendo orientativos: una configuración válida no implica precisión predictiva.
 
@@ -1947,7 +1957,8 @@ Elegir modo auto no activa ninguna capa apagada. Las historias, puntuaciones, co
 
 | Clave | Defecto | Qué ocurre al aumentar / disminuir | Cuándo interviene / restricciones |
 |---|---|---|---|
-| `eex.max_stale_days` | `0` | Cero permite cualquier antigüedad anterior. Entre positivos, aumentarlo admite publicaciones más antiguas y puede ampliar cobertura; reducirlo las rechaza antes. | Selección por fecha de referencia; entero no negativo. Nunca usa publicaciones futuras. Cero **no** significa solo el mismo día. Aprender historia sigue requiriendo EEX del mismo día. |
+| `eex.offset_days` | `0` | Entero no positivo en días naturales. Corte igual a referencia más offset: 0 permite T; -1 excluye T; valores más negativos retrasan más la evidencia. | No cambia T ni la resolución de tenors. Afecta precios, medias y disponibilidad de parejas históricas exactas. Escenario fijo de backtest, no campo del grid. |
+| `eex.max_stale_days` | `0` | Cero permite cualquier antigüedad anterior. Entre positivos, aumentarlo admite publicaciones más antiguas y puede ampliar cobertura; reducirlo las rechaza antes. | La edad es referencia menos publicación, no corte menos publicación. Entero no negativo. Cero **no** significa solo el mismo día. El aprendizaje exige propio/EEX de la misma fecha original. |
 | `eex.warn_stale_days` | `3` | Aumentarlo retrasa el nivel ERROR en mensajes de antigüedad; reducirlo hace el log más sensible. | Solo logging. Usa entero no negativo. No rechaza settlements, cambia precios ni hace fallar por sí solo una ejecución; la aceptación depende de `max_stale_days`. |
 
 ### Zonas horarias: horas de entrega, no un ajuste de precio
@@ -1991,7 +2002,7 @@ La lista entregada es `D+1, D+2, D+3, WE, WE+1, WE+2, WE+3, BOW, W+1, W+2, W+3, 
 | `method.hist_max_age_days` | `60` | Mayor permite utilizar medias más antiguas; menor las caduca antes y aumenta la dependencia de hoy o del respaldo EEX suavizado. | Límite positivo en días naturales; el cargador exige >0. Una media de tipo/grupo/global caduca tras más de N días desde su última observación propia válida. Puede seguir vigente un respaldo grupo/global cuando caduca un tipo. |
 | `method.hist_auto_min_obs` | `10` | Mayor retrasa la decisión de aceptar/rechazar historia con evidencia; menor permite decidir antes, con más ruido. Antes del umbral se permite historia disponible. | Solo controla `layers.hist="auto"`; usa masa efectiva no negativa. Las puntuaciones por modo/grupo decaen con `ewma_halflife_days`, por lo que no equivale a un número bruto de filas. |
 
-Auto elige additive si el EEX absoluto del objetivo está bajo el umbral; en otro caso ratio si hay anclas ratio válidas; si no, additive si hay anclas aditivas; si tampoco, additive cuando solo existe historia aditiva vigente y permitida; en el resto, ratio. Un objetivo sin ajuste utilizable intenta el respaldo EEX suavizado; el modo seleccionado no transforma ese respaldo. La historia aprende únicamente de anclas originales con EEX del mismo día, después de predecir; los estimados no entrenan el modelo.
+Auto elige additive si el EEX absoluto del objetivo está bajo el umbral; en otro caso ratio si hay anclas ratio válidas; si no, additive si hay anclas aditivas; si tampoco, additive cuando solo existe historia aditiva vigente y permitida; en el resto, ratio. Un objetivo sin ajuste utilizable intenta el respaldo EEX suavizado; el modo seleccionado no transforma ese respaldo. La historia aprende originales emparejados con EEX de su misma fecha: después de predecir con offset cero o mediante liberación retrasada con offset negativo (sección 20). Los estimados no entrenan el modelo.
 
 ### Respaldo sin ajuste (`[eex_fallback]`)
 
@@ -2049,7 +2060,7 @@ detalla la gestión de fallos.
 
 ### Controles opcionales de forma posteriores al relleno
 
-Estas siete claves implementadas completan el inventario de 58. La sección 17 desarrolla objetivo, ejemplos y procedencia. Sus valores numéricos iniciales no están calibrados.
+Estas siete claves implementadas completan el inventario de 59. La sección 17 desarrolla objetivo, ejemplos y procedencia. Sus valores numéricos iniciales no están calibrados.
 
 | Clave | Inicial | Significado y efecto |
 |---|---|---|
@@ -2171,8 +2182,8 @@ No usamos operaciones propias ni estimaciones anteriores para entrenar este resp
 
 ### Ventanas completas, contratos fijos y medias
 
-Se toman las últimas publicaciones distintas del archivo EEX hasta la fecha de referencia,
-terminando en el último snapshot permitido por `eex.max_stale_days`. Son **observaciones
+Se toman las últimas publicaciones distintas del archivo EEX hasta el corte
+`reference_date + eex.offset_days`, terminando en el último snapshot permitido por `eex.max_stale_days`. Son **observaciones
 publicadas**, no días naturales: repetir un settlement antiguo en varios días sin publicación
 no aumenta la muestra. Nunca se toman publicaciones futuras.
 
@@ -2280,7 +2291,7 @@ anchor_months = 2
 Estos controles no afectan a originales ni a precios con ajuste local/histórico/cross.
 Las ventanas de precio y spread son independientes: no se exige que una sea mayor que la otra.
 La antigüedad máxima controla el último snapshot permitido, no convierte las ventanas en
-ventanas de días naturales. Las 58 claves del config incluyen estos cinco controles.
+ventanas de días naturales. Las 59 claves del config incluyen estos cinco controles.
 
 En `daily`, `refill`, `catchup`, `backtest` y `tune` se pueden sustituir para una ejecución:
 
@@ -2487,7 +2498,8 @@ histórica real por estación, horizonte, bloques ausentes y cambios de calendar
 de años por sí solo no garantiza cobertura adecuada.
 
 `pipeline_configured` del backtest incluye shape después de ocultar el periodo evaluado y
-sus alias. La memoria continúa aprendiendo solo originales reales después de predecir.
+sus alias. La memoria aprende solo originales reales con EEX contemporáneo, después de
+predecir con offset cero o mediante la liberación retrasada de la sección 20.
 Tune por CLI conserva sus seis dimensiones de búsqueda; shape queda fijo en toda la rejilla y se
 guarda en el snapshot de configuración. Comparar distintas configuraciones de shape requiere
 ejecuciones controladas sobre los mismos casos.
@@ -2582,7 +2594,7 @@ PARAMETER_GRID = {
 Esto crea **3 × 2 = 6** candidatos. Las listas forman un producto cartesiano limitado por
 `MAX_TRIALS` (24 en el notebook). Lo omitido queda fijo. Se excluyen del grid rutas,
 mapping/identidad, targets, convenciones, filtros de volumen/extremos, protecciones del ratio,
-antigüedad EEX y fechas de evaluación para conservar un universo común de observaciones.
+offset de disponibilidad/antigüedad EEX y fechas de evaluación para conservar un universo común de observaciones.
 Admitir un parámetro no significa que convenga optimizarlo ni que tenga efecto en todos los casos.
 
 La evaluación conserva sus reglas: ocultar un periodo físico propio y todos sus alias;
@@ -2607,3 +2619,82 @@ local/histórico/cross para comparar esa rama de forma controlada. Asimismo, sha
 su tolerancia diagnóstica no modifican precios. Antes de generalizar a desconocidos reales,
 evalúa bloques de huecos apropiados y fechas posteriores intactas; registrar experimentos no
 elimina esos límites de validación.
+
+## 20. ¿Qué publicación EEX está disponible para cada fecha de referencia?
+
+`[eex].offset_days` es un entero no positivo, **0** por defecto. En Python se llama
+`Config.eex_offset_days` y en el CLI `--eex-offset-days`. Para la fecha de referencia T:
+
+```text
+corte = T + offset_days días naturales
+publicación = última publicación EEX suministrada con fecha <= corte
+antigüedad = T - publicación
+```
+
+La publicación debe cumplir además `max_stale_days`, medido desde **T**, no desde el corte.
+Cero en el TOML sigue significando antigüedad ilimitada. Si no existe publicación admisible,
+no hay EEX disponible; los propios intactos y la reconstrucción permitida conservan sus
+reglas habituales. Que una publicación sea válida no garantiza que tenga cada contrato de entrega.
+
+| Referencia T | Offset | Corte | Ejemplo de selección |
+|---|---:|---|---|
+| Miércoles 07-10-2026 | 0 | 07-10-2026 | El día 7 si está suministrado; si falta, última publicación anterior |
+| Miércoles 07-10-2026 | -1 | 06-10-2026 | El día 6 o anterior, aunque el archivo contenga el 7 |
+| Lunes 05-10-2026 | -1 | Domingo 04-10-2026 | Viernes 2 si no se publica el fin de semana; antigüedad tres días |
+| Jueves 01-10-2026 | -1 | 30-09-2026 | EEX de septiembre puede valorar targets de octubre; M+1 sigue siendo noviembre |
+
+No es un desfase en días de negociación ni en filas disponibles. Se rechazan offsets positivos.
+No se exige una publicación exacta en la fecha de corte. Un máximo de antigüedad de dos días
+rechaza el ejemplo viernes-lunes; cambiar el corte no rejuvenece la cotización.
+
+El corte se aplica a la selección EEX, las referencias reconstruidas y el final de ambas
+ventanas de respaldo. Cinco publicaciones para precios y nueve para spreads se toman como
+publicaciones distintas hasta el corte. Se mantienen las ventanas completas; no se convierten
+en cinco/nueve días naturales. Los targets, zonas horarias, horas y calendario de la cascada
+mensual siguen referidos a **T**, no al corte ni a `eex_asof`.
+
+### Histórico propio, correlación y CROSS con retraso
+
+Con offset cero se conserva el orden habitual: primero predecir T y después aprender parejas
+originales propias/EEX admisibles de T. Con offset negativo, antes de predecir T se liberan
+cronológicamente las parejas anteriores cuya fecha original h cumpla `h<T` y `h<=corte`.
+La pareja siempre es **Propio_h con EEX_h**. Si falta EEX contemporáneo no se inventa la pareja
+y los estimados nunca entrenan. La fecha h sigue rigiendo la caducidad y el decaimiento de
+covarianzas; una pareja antigua no se rejuvenece al liberarla.
+
+Por ejemplo, el miércoles con offset -1 puede usarse la pareja propia/EEX del martes; la
+del miércoles todavía no. Con offset -2, esa pareja del martes espera hasta el jueves.
+Medias, diagnósticos de hist-auto y covarianzas reciben solo la evidencia anterior permitida.
+LOCAL sí puede comparar las anclas propias del miércoles con el EEX anterior admitido para
+rellenar los huecos del miércoles.
+
+**CROSS tiene una restricción adicional:** las sorpresas actuales exigen `eex_asof == T`.
+Con offset negativo no se cumple, así que no hay ajuste CROSS actual utilizable. Sus relaciones
+sí pueden aprender parejas exactas con retraso, y los pesos aprendidos de correlación local
+también pueden utilizarse. Es un límite explícito del modelo cross actual, no una afirmación
+de que deje de existir información entre mercados.
+
+### Ejecutar, auditar y comparar esta política
+
+`daily`, `refill`, `catchup`, `backtest` y `tune` admiten `--eex-offset-days 0` o `-1`, y otros
+enteros no positivos. En el notebook `EEX_OFFSET_DAYS=None` respeta el config seleccionado;
+un entero sustituye el valor de la copia del dataset sin reescribir el TOML. La disponibilidad
+queda fija dentro de un grid: se excluye tanto de los seis campos del CLI como de los 29 de
+experimentos. Compara offsets en ejecuciones separadas y claramente identificadas. Usa las
+mismas fechas de evaluación previstas y revisa muestra emparejada y cobertura reales: una
+política más estricta puede eliminar observaciones evaluables y hacer los scores no comparables.
+
+Filled y LOO incorporan `eex_offset_days`, `eex_cutoff_date` y `eex_asof`. El enriquecido usa
+esos nombres con prefijo `curve_` en sus trazas del motor; el JSON de suavizado incluye el corte.
+El log distingue fecha de referencia, última fecha permitida y publicación elegida. Así se
+entiende si una cotización anterior viene impuesta por política o simplemente es la última
+disponible, sin cambiar la fecha de referencia de la fila.
+
+Catchup no recalcula silenciosamente resultados completados. Dentro de las fechas/curvas/
+targets activos solicitados, rechaza filas filled o enriched existentes con otro offset;
+metadatos antiguos ausentes o vacíos equivalen a cero. Un refill explícito con el offset deseado,
+o una carpeta de output separada, resuelve la discrepancia. Las filas fuera del alcance no bloquean.
+
+Se utilizan las fechas de publicación del CSV suministrado. No hay reloj de publicación en
+vivo, horas intradía ni archivo de versiones históricas. El offset representa la convención
+operativa elegida; no demuestra la disponibilidad real que tuvo cada precio en el pasado.

@@ -25,6 +25,11 @@ output/
 
 `daily` and `refill` preserve original rows, including unmapped/off/helper curves, in enriched output. `catchup` updates only pending active `fill` date/curve groups; already complete groups remain intact. It does not add raw rows of unrelated curves. A processed target with `source=missing` is already processed. Recalculation replaces the selected date/curve groups in histories, rather than appending another version. There is no `latest.csv` file.
 
+Catchup rejects existing filled/enriched target rows with a different `eex_offset_days` in
+its requested active date/curve/target scope. A missing or blank legacy offset means zero.
+Use explicit refill with the intended offset or another output directory to change that
+policy; catchup does not silently relabel or recalculate previously completed prices.
+
 The `make-synthetic` command writes `synthetic_vwaps.csv` and `synthetic_truth.csv` to its selected destination (see below). Logs are text records with timestamp, severity and message, not a tabular price output.
 
 ## Enriched output: the original table with provenance
@@ -58,7 +63,7 @@ Input names `data_origin`, `estimation_method` and names starting with `curve_` 
 | `curve_row_type` | Text: `original`, `original_invalid`, `added` | Whether the physical row already existed, contained an unusable VWAP, or was appended. Independent of price origin. |
 | `curve_flags` | Semicolon-separated text or empty | Engine flags plus enrichment flags, listed below. |
 
-**Every other engine column in the next section is copied with `curve_` prefixed**, except `data_origin` and `estimation_method`, which use the enrichment semantics above. Thus the full normal trace also includes `curve_area`, `curve_profile`, `curve_kind`, `curve_period`, `curve_delivery_start`, `curve_delivery_end`, `curve_hours`, `curve_confidence`, `curve_basis_mode`, `curve_configured_basis_mode`, `curve_own_vwap`, `curve_own_volume`, `curve_eex_settle`, `curve_eex_method`, `curve_eex_asof`, `curve_eex_fallback_trace`, `curve_basis`, `curve_basis_local`, `curve_basis_hist`, `curve_cross_adj`, `curve_local_weight`, `curve_anchors`, `curve_cross_from` and **`curve_flag`**. If no engine rows were produced, only the fixed enrichment columns are guaranteed; optional trace columns depend on the engine table supplied.
+**Every other engine column in the next section is copied with `curve_` prefixed**, except `data_origin` and `estimation_method`, which use the enrichment semantics above. Thus the full normal trace also includes `curve_area`, `curve_profile`, `curve_kind`, `curve_period`, `curve_delivery_start`, `curve_delivery_end`, `curve_hours`, `curve_confidence`, `curve_basis_mode`, `curve_configured_basis_mode`, `curve_own_vwap`, `curve_own_volume`, `curve_eex_settle`, `curve_eex_method`, `curve_eex_asof`, `curve_eex_offset_days`, `curve_eex_cutoff_date`, `curve_eex_fallback_trace`, `curve_basis`, `curve_basis_local`, `curve_basis_hist`, `curve_cross_adj`, `curve_local_weight`, `curve_anchors`, `curve_cross_from` and **`curve_flag`**. If no engine rows were produced, only the fixed enrichment columns are guaranteed; optional trace columns depend on the engine table supplied.
 
 `curve_flag` is the engine's singular `flag` copied unchanged. `curve_flags` is the combined enrichment field. Do not confuse them. On valid original rows, `curve_price`, `curve_source`, and, when present, `curve_own_vwap`/`curve_own_volume` describe that exact original row. An enabled original shape adjustment changes only the usable curve price and its provenance; raw observations and own diagnostics remain available. Other trace fields describe the matching engine point and can be empty, or refer to an aggregate of repeated original delivery periods. The presence of an original row does not imply that all diagnostics were computed.
 
@@ -72,7 +77,7 @@ Illustrative rows, not actual market observations; all three use the same EUR/MW
 
 The third row also receives `original_vwap_missing_or_invalid`. If a price were available for it, its original `vwap` would still read `invalid`; `curve_price` would hold the estimate and `data_origin` would become `estimated`.
 
-## Filled output: 33 base engine columns
+## Filled output: 35 base engine columns
 
 These fields are written to `filled_history.csv` and daily filled files. There is one row per resolvable configured target label and active `fill` curve/date; active shape also includes observed Month/Quarter/Year labels needed as context. An unresolvable target produces no row. Different labels can resolve to the same delivery period.
 
@@ -101,7 +106,9 @@ These fields are written to `filled_history.csv` and daily filled files. There i
 | `own_volume` | Number or empty | Volume associated with that own period; may be aggregated or unavailable. |
 | `eex_settle` | Number or empty | EEX price for this delivery period, exact or reconstructed. Not necessarily a directly quoted settlement. |
 | `eex_method` | Text or empty | EEX reference method: `exact`, `strip` or `residual`. If smoothing fails and arbitrage succeeds, retains this reference method when present; without a reference it receives reconstruction method. `estimation_method=contract_*` always identifies final arbitrage construction. |
-| `eex_asof` | ISO date or empty | Date of the EEX snapshot used. Can be earlier than `reference_date`, or present even if that snapshot cannot price this particular target. |
+| `eex_asof` | ISO date or empty | Date of the accepted EEX snapshot, no later than `eex_cutoff_date`. Can precede `reference_date`, or exist even if that snapshot cannot price this target. Empty if no snapshot satisfies availability/staleness. |
+| `eex_offset_days` | Integer <=0 | Applied calendar-day availability offset. 0 permits a publication on the reference date; -1 excludes it. Does not move target delivery dates. |
+| `eex_cutoff_date` | ISO date | Latest permitted publication date: `reference_date + eex_offset_days`. A policy limit, not necessarily a date on which EEX published. Remains meaningful without an available EEX price. |
 | `eex_fallback_trace` | JSON or empty | Full evidence for `eex+smooth`; see JSON dictionary below. Empty in other branches. |
 | `basis` | Number or empty | Final adjustment applied to EEX, after any ratio limit. Zero is a real adjustment of zero, distinct from empty on own/arbitrage/missing/eex+smooth rows. |
 | `basis_local` | Number or empty | Today's local anchor adjustment before blending; empty when unavailable or disabled. |
@@ -114,6 +121,12 @@ These fields are written to `filled_history.csv` and daily filled files. There i
 
 For `basis`, `basis_local`, `basis_hist` and `cross_adj`, **ratio values are fractions**: `0.05` means +5%, and `price = eex_settle * (1 + basis)`. Additive values use the price unit: `0.05` means +0.05 EUR/MWh on an EUR/MWh curve, and `price = eex_settle + basis`. Never combine adjustments from different modes as if they shared units. `local_weight` is dimensionless in both modes. Own values need not have populated basis diagnostics. With shape active these formulas describe `price_before_shape`; the final price additionally includes `shape_adjustment`.
 
+Example: a Monday 2026-10-05 row with offset -1 has `eex_cutoff_date=2026-10-04`. If the
+latest permitted quote is Friday, `eex_asof=2026-10-02` and its age is **three** days relative
+to `reference_date`, not two relative to the cutoff. A `max_stale_days=2` limit rejects that
+quote. Enriched fields are `curve_eex_offset_days`, `curve_eex_cutoff_date` and `curve_eex_asof`;
+rows without matching engine diagnostics may have those fields empty.
+
 ### Smoothed EEX fallback audit JSON
 
 `eex_fallback_trace` contains JSON within one CSV cell; enriched output calls it
@@ -124,6 +137,7 @@ In Python, use `json.loads(cell)` when the cell is nonempty.
 | JSON key | Meaning |
 |---|---|
 | `reference_date`, `eex_asof` | Calculated date and latest accepted publication |
+| `eex_offset_days`, `eex_cutoff_date` | Applied availability policy and latest permitted publication date for both price and spread windows |
 | `target` | Absolute target object `kind, delivery_start, delivery_end`; exclusive end |
 | `price_method`, `price_window`, `ewma_halflife`, `spread_window`, `anchor_months` | Five effective controls, including overrides |
 | `spread_input` | `raw_same_publication_prices`: raw same-publication EEX prices for each difference |
@@ -215,6 +229,7 @@ Auto rationale flags are emitted when an EEX-based estimate takes that branch, n
 | Column | Meaning / values |
 |---|---|
 | `reference_date`, `product`, `region`, `unit`, `tenor`, `kind` | Observation date, full identity and held-out contract. `tenor` can combine own alias labels. |
+| `eex_offset_days`, `eex_cutoff_date`, `eex_asof` | Fixed availability offset, computed cutoff and actual accepted EEX snapshot for this held-out case. LOO requires an EEX-evaluable own observation. |
 | `group` | `short` (Day/Weekend/BOW/Week), `month` (BOM/Month), `quarter` (Quarter), `long` (Season/Year). |
 | `own` | Held-out own price, possibly aggregated by delivery period. |
 | `volume` | Associated own volume; can be empty. |
@@ -226,6 +241,10 @@ Auto rationale flags are emitted when an EEX-based estimate takes that branch, n
 | `error` | `pred - own`; positive means overprediction. |
 
 `pipeline_configured` applies the actual configuration, including active shape, after hiding the observation and its aliases. The named alternatives are diagnostic comparisons and are not all constrained by the deployed layer switches/guards in the same way.
+
+Negative offsets delay exact-date historical training; they do not pair today's own with
+older EEX for learning. Current CROSS surprises still require same-day EEX, so negative
+offsets provide no current cross adjustment. See [algorithm section 20](ALGORITHM.md#20-which-eex-publication-is-available-for-each-reference-date).
 
 `backtest_report.csv` groups by `unit`, `method`, `group`; `group=ALL` combines contract groups within that same unit. Every absolute metric remains in its group's unit.
 
@@ -243,6 +262,11 @@ Metrics are rounded to four decimals. Optional `backtest --truth` prints, withou
 ## Tuning outputs
 
 `tuning_calibration.csv` reports all finite-grid candidates on earlier dates. `tuning_validation.csv` reports only the selected candidate on reserved later dates. Parameters are fixed before validation; previous original observations can still update history chronologically. Neither output changes production configuration.
+
+Availability is fixed across each grid. Tuning metadata records `eex_offset_days`,
+`eex_availability_policy` and `eex_staleness_origin`; the configuration snapshot also includes
+`eex_offset_days`. These describe which publications were permitted and that age is measured
+from the reference date. Different offsets belong to separate scenario runs, not grid rows.
 
 Both tables contain:
 
@@ -282,6 +306,7 @@ Selection prioritizes maximum coverage, then minimizes score on the prediction i
 All `metadata` keys:
 
 - `objective` = `mean_per_curve_mae_model_over_mae_eex`; `evaluated_method` = `pipeline_configured`; `baseline` = `eex`.
+- `eex_offset_days`: fixed nonpositive calendar-day offset; `eex_availability_policy` = `latest_publication_on_or_before_reference_date_plus_calendar_day_offset`; `eex_staleness_origin` = `reference_date`.
 - `parameter_grid`: requested field-to-list grid; `selection_scope`: maximum calibration coverage, then best common-case score within the supplied finite grid; `lower_score_is_better`: true; `tie_break`: `first_candidate_in_grid_order`.
 - `calibration_start`, `calibration_end`, `validation_start`, `validation_end`: allocated observation-date boundaries. `calibration_days`, `validation_days`: distinct allocated dates, not calendar-day duration.
 - `n_trials`, `selected_trial_id`, `calibration_score`, `validation_score`: candidate count, winner ID and scores.
@@ -291,7 +316,7 @@ All `metadata` keys:
 - `calibration_paired_days`, `validation_paired_days`, `calibration_paired_start`, `calibration_paired_end`, `validation_paired_start`, `validation_paired_end`: dates actually contributing matched observations.
 - `warmup_days` = 0; `validation_protocol` = `fixed_selected_parameters_with_chronological_original_history_updates`.
 
-`base_configuration` keys are `base_dir`, `vwap_input`, `mapping_file`, `eex_curves_dir`, `output_dir`; `layer_local`, `layer_correlation`, `layer_cross`, `layer_hist`, `layer_arbitrage`; `max_stale_days`, `warn_stale_days`, `timezones`, `tenors`, `day_convention`, `weekend_offset`; `basis_mode`, `min_volume`, `tau_log`, `other_kind_weight`, `shrink_k`, `ewma_halflife_days`, `max_anchor_dev`, `hist_auto_min_obs`; `corr_halflife_days`, `corr_prior_obs`, `cross_min_corr`, `cross_min_obs`, `cross_halflife_days`; `warmup_days`, `vwap_columns`, `ratio_eex_floor`, `max_ratio_deviation`, `hist_max_age_days`; `fallback_price_method`, `fallback_price_window`, `fallback_ewma_halflife`, `fallback_spread_window`, `fallback_anchor_months`. These are configuration values, not measured outcomes; see [ALGORITHM.md](ALGORITHM.md) and [config.toml](config.toml) for their meaning. Paths become strings. Nonfinite diagnostic numbers are serialized as JSON `null`; CSV diagnostic scores may display `inf`/`-inf` for the zero-baseline case above. This does not permit nonfinite production prices.
+`base_configuration` keys are `base_dir`, `vwap_input`, `mapping_file`, `eex_curves_dir`, `output_dir`; `layer_local`, `layer_correlation`, `layer_cross`, `layer_hist`, `layer_arbitrage`; `max_stale_days`, `warn_stale_days`, `eex_offset_days`, `timezones`, `tenors`, `day_convention`, `weekend_offset`; `basis_mode`, `min_volume`, `tau_log`, `other_kind_weight`, `shrink_k`, `ewma_halflife_days`, `max_anchor_dev`, `hist_auto_min_obs`; `corr_halflife_days`, `corr_prior_obs`, `cross_min_corr`, `cross_min_obs`, `cross_halflife_days`; `warmup_days`, `vwap_columns`, `ratio_eex_floor`, `max_ratio_deviation`, `hist_max_age_days`; `fallback_price_method`, `fallback_price_window`, `fallback_ewma_halflife`, `fallback_spread_window`, `fallback_anchor_months`. These are configuration values, not measured outcomes; see [ALGORITHM.md](ALGORITHM.md) and [config.toml](config.toml) for their meaning. Paths become strings. Nonfinite diagnostic numbers are serialized as JSON `null`; CSV diagnostic scores may display `inf`/`-inf` for the zero-baseline case above. This does not permit nonfinite production prices.
 
 ## Synthetic files
 
@@ -303,8 +328,8 @@ These files are explicitly simulated data, never real transactions. `synthetic_v
 
 ## Active shape output: 11 additional engine columns
 
-With `shape.mode=off`, the engine retains the 33-column schema above. Audit/adjust add the
-following 11 fields (44 engine columns in total). In enriched output every one is prefixed
+With `shape.mode=off`, the engine retains the 35-column schema above. Audit/adjust add the
+following 11 fields (46 engine columns in total). In enriched output every one is prefixed
 with `curve_`, including `curve_data_origin_before_shape` and
 `curve_estimation_method_before_shape`. Rows without a matching engine point can have empty
 trace fields. Active shape can add observed full Month/Quarter/Year labels outside the target
